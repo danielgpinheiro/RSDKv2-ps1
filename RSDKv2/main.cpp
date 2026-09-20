@@ -5,6 +5,16 @@
 #include <psyqo/gpu.hh>
 #include "common/syscalls/syscalls.h"
 
+psyqo::GPU *g_ps1GPU = nullptr;
+
+void PS1PresentFramebuffer(ushort *fb) {
+    if (!g_ps1GPU)
+        return;
+    unsigned parity = g_ps1GPU->getParity();
+    int16_t  y      = (parity == 0) ? 0 : 256;
+    g_ps1GPU->uploadToVRAM(fb, psyqo::Rect{{0, y}, {DEFAULT_SCREEN_XSIZE, SCREEN_YSIZE}});
+}
+
 class RSDKv2PS1App final : public psyqo::Application {
   public:
     void prepare() override {
@@ -16,6 +26,8 @@ class RSDKv2PS1App final : public psyqo::Application {
                              .set(psyqo::GPU::ColorMode::C15BITS)
                              .set(psyqo::GPU::Interlace::PROGRESSIVE)
                              .set(psyqo::GPU::MiscSetting::CLEAR_VRAM));
+
+        g_ps1GPU = &gpu();
 
         Engine.Init();
         syscall_puts("[RSDKv2-PS1] Engine.Init() returned (Phase 2 milestone)\n");
@@ -29,24 +41,13 @@ class RSDKv2PS1App final : public psyqo::Application {
     }
 
     void frame() override {
-        // Phase 3 milestone 3: 8-bit indexed framebuffer -> BGR555 -> VRAM.
-        constexpr int FB_W = DEFAULT_SCREEN_XSIZE;
-        constexpr int FB_H = SCREEN_YSIZE;
-        unsigned      parity = gpu().getParity();
-        int16_t       y      = (parity == 0) ? 0 : 256;
-        const byte   *src    = Engine.FrameBuffer;
-        for (int i = 0; i < FB_W * FB_H; ++i) {
-            const Colour &c = TilePalette[src[i]];
-            s_fb16[i]       = (uint16_t)(((c.b >> 3) << 10) | ((c.g >> 3) << 5) | (c.r >> 3));
-        }
-        gpu().uploadToVRAM(s_fb16, psyqo::Rect{{0, y}, {FB_W, FB_H}});
+        // Task 1.3 verification: route the blit through FlipScreen().
+        Engine.ColourMode = 1;               // 16-bit path (FlipScreen case 1)
+        Engine.GameMode   = ENGINE_MAINGAME; // != EXITGAME so FlipScreen runs
+        FlipScreen();
     }
-
-  private:
-    static uint16_t s_fb16[DEFAULT_SCREEN_XSIZE * SCREEN_YSIZE];
 };
 
-uint16_t RSDKv2PS1App::s_fb16[DEFAULT_SCREEN_XSIZE * SCREEN_YSIZE];
 static RSDKv2PS1App rsdkv2App;
 #endif
 

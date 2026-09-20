@@ -258,6 +258,37 @@ void RetroEngine::Init() {
     skipFrameIndex   = refreshRate / lower;
 }
 
+void RetroEngine::RunFrame() {
+    GameRunning = processEvents();
+
+    for (int s = 0; s < gameSpeed; ++s) {
+        ReadInputDevice();
+
+        if (!masterPaused || frameStep) {
+            switch (GameMode) {
+                case ENGINE_SYSMENU:
+                    ProcessSystemMenu();
+                    FlipScreen();
+                    break;
+                case ENGINE_MAINGAME:
+                    ProcessStage();
+                    break;
+                case ENGINE_INITSYSMENU:
+                    LoadGameConfig("Data/Game/GameConfig.bin");
+                    InitSystemMenu();
+                    ResetCurrentStageFolder();
+                    break;
+                case ENGINE_EXITGAME:
+                    GameRunning = false;
+                    break;
+                default: break;
+            }
+        }
+    }
+
+    frameStep = false;
+}
+
 void RetroEngine::Run() {
 #if !RETRO_USE_ORIGINAL_CODE && RETRO_PLATFORM != RETRO_PS1
     unsigned long long targetFreq = SDL_GetPerformanceFrequency() / Engine.refreshRate;
@@ -274,34 +305,7 @@ void RetroEngine::Run() {
             prevTicks = curTicks;
         }
 #endif
-        GameRunning = processEvents();
-
-        for (int s = 0; s < gameSpeed; ++s) {
-            ReadInputDevice();
-
-            if (!masterPaused || frameStep) {
-                switch (GameMode) {
-                    case ENGINE_SYSMENU:
-                        ProcessSystemMenu();
-                        FlipScreen();
-                        break;
-                    case ENGINE_MAINGAME: 
-                        ProcessStage(); 
-                        break;
-                    case ENGINE_INITSYSMENU:
-                        LoadGameConfig("Data/Game/GameConfig.bin");
-                        InitSystemMenu();
-                        ResetCurrentStageFolder();
-                        break;
-                    case ENGINE_EXITGAME: 
-                        GameRunning = false; 
-                        break;
-                    default: break;
-                }
-            }
-        }
-
-        frameStep = false;
+        RunFrame();
     }
 
     ReleaseSoundDevice();

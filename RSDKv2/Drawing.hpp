@@ -45,6 +45,7 @@ extern byte GraphicData[GFXDATA_MAX];
 
 int InitRenderDevice();
 void FlipScreen();
+void PS1PresentFramebuffer(ushort *fb);
 void ReleaseRenderDevice();
 
 void ClearScreen(byte index);

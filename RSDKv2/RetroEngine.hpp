@@ -201,6 +201,7 @@ public:
 
     void Init();
     void Run();
+    void RunFrame();
 
     bool LoadGameConfig(const char *Filepath);
 

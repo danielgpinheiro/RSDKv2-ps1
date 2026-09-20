@@ -238,7 +238,14 @@ void FlipScreen() {
                 }
             }
 
-#if RETRO_USING_SDL2
+#if RETRO_PLATFORM == RETRO_PS1
+            // PS1: convert RGB565 -> BGR555 and upload to the current VRAM buffer.
+            for (int i = 0; i < SCREEN_XSIZE * SCREEN_YSIZE; ++i) {
+                ushort px      = frameBuffer[i];
+                frameBuffer[i] = (ushort)(((px & 0x1F) << 10) | ((((px >> 5) & 0x3F) >> 1) << 5) | ((px >> 11) & 0x1F));
+            }
+            PS1PresentFramebuffer(frameBuffer);
+#elif RETRO_USING_SDL2
             SDL_LockTexture(Engine.screenBuffer, NULL, &pixels, &pitch);
             memcpy(pixels, frameBuffer, pitch * SCREEN_YSIZE);
             SDL_UnlockTexture(Engine.screenBuffer);
