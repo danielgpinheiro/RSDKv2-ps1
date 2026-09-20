@@ -367,11 +367,11 @@ void LoadActLayout() {
         NewXBoundary2 = StageLayouts[0].xsize << 7;
         NewYBoundary2 = StageLayouts[0].ysize << 7;
 
-        for (int i = 0; i < 0x10000; ++i) StageLayouts[0].tiles[i] = 0;
+        for (int i = 0; i < TILELAYER_CHUNK_MAX; ++i) StageLayouts[0].tiles[i] = 0;
 
         byte fileBuffer = 0;
         for (int y = 0; y < StageLayouts[0].ysize; ++y) {
-            ushort *tiles = &StageLayouts[0].tiles[(y * 0x100)];
+            ushort *tiles = &StageLayouts[0].tiles[(y * TILELAYER_CHUNK_W)];
             for (int x = 0; x < StageLayouts[0].xsize; ++x) {
                 FileRead(&fileBuffer, 1);
                 tiles[x] = fileBuffer << 8;
@@ -514,7 +514,7 @@ void LoadStageBackground() {
 
             // Read Layout
             for (int y = 0; y < StageLayouts[i].ysize; ++y) {
-                ushort *chunks = &StageLayouts[i].tiles[y * 0x100];
+                ushort *chunks = &StageLayouts[i].tiles[y * TILELAYER_CHUNK_W];
                 for (int x = 0; x < StageLayouts[i].xsize; ++x) {
                     FileRead(&fileBuffer, 1);
                     *chunks += fileBuffer;
@@ -556,7 +556,7 @@ void LoadStageCollisions() {
 
         byte fileBuffer = 0;
         int tileIndex   = 0;
-        for (int t = 0; t < 1024; ++t) {
+        for (int t = 0; t < TILE_COUNT; ++t) {
             for (int p = 0; p < 2; ++p) {
                 FileRead(&fileBuffer, 1);
                 bool isCeiling             = fileBuffer >> 4;
@@ -762,7 +762,7 @@ void LoadStageGIFFile(int stageID) {
         ReadGifPictureData(width, height, interlaced, TileGfx, 0);
 
         byte transparent = TileGfx[0];
-        for (int i = 0; i < 0x40000; ++i) {
+        for (int i = 0; i < TILESET_SIZE; ++i) {
             if (TileGfx[i] == transparent)
                 TileGfx[i] = 0;
         }
@@ -808,7 +808,7 @@ void LoadStageGFXFile(int stageID) {
         }
 
         byte transparent = TileGfx[0];
-        for (int i = 0; i < 0x40000; ++i) {
+        for (int i = 0; i < TILESET_SIZE; ++i) {
             if (TileGfx[i] == transparent)
                 TileGfx[i] = 0;
         }

@@ -585,7 +585,7 @@ void DrawHLineScrollLayer(int layerID) {
             int chunkXPos         = chunkX >> 7;
             int tilePxXPos        = chunkX & 0xF;
             int tileXPxRemain     = TILE_SIZE - tilePxXPos;
-            int chunk             = (layer->tiles[(chunkX >> 7) + (chunkY << 8)] << 6) + ((chunkX & 0x7F) >> 4) + 8 * tileY;
+            int chunk             = (layer->tiles[(chunkX >> 7) + (chunkY * TILELAYER_CHUNK_W)] << 6) + ((chunkX & 0x7F) >> 4) + 8 * tileY;
             int tileOffsetY       = TILE_SIZE * tileY16;
             int tileOffsetYFlipX  = TILE_SIZE * tileY16 + 0xF;
             int tileOffsetYFlipY  = TILE_SIZE * (0xF - tileY16);
@@ -656,7 +656,7 @@ void DrawHLineScrollLayer(int layerID) {
                     if (++chunkXPos == layerwidth)
                         chunkXPos = 0;
                     chunkTileX = 0;
-                    chunk      = (layer->tiles[chunkXPos + (chunkY << 8)] << 6) + 8 * tileY;
+                    chunk      = (layer->tiles[chunkXPos + (chunkY * TILELAYER_CHUNK_W)] << 6) + 8 * tileY;
                 }
                 lineRemain -= TILE_SIZE;
 
@@ -950,7 +950,7 @@ void DrawHLineScrollLayer(int layerID) {
                     if (++chunkXPos == layerwidth)
                         chunkXPos = 0;
 
-                    chunk = (layer->tiles[chunkXPos + (chunkY << 8)] << 6) + 8 * tileY;
+                    chunk = (layer->tiles[chunkXPos + (chunkY * TILELAYER_CHUNK_W)] << 6) + 8 * tileY;
                 }
 
                 tilePxLineCnt = lineRemain >= TILE_SIZE ? TILE_SIZE : lineRemain;
@@ -1097,7 +1097,7 @@ void DrawVLineScrollLayer(int layerID) {
         int chunkYPos         = chunkY >> 7;
         int tileY             = chunkY & 0xF;
         int tileYPxRemain     = TILE_SIZE - tileY;
-        int chunk             = (layer->tiles[chunkX + (chunkY >> 7 << 8)] << 6) + tileX + 8 * ((chunkY & 0x7F) >> 4);
+        int chunk             = (layer->tiles[chunkX + ((chunkY >> 7) * TILELAYER_CHUNK_W)] << 6) + tileX + 8 * ((chunkY & 0x7F) >> 4);
         int tileOffsetXFlipX  = 0xF - tileX16;
         int tileOffsetXFlipY  = tileX16 + SCREEN_YSIZE;
         int tileOffsetXFlipXY = 0xFF - tileX16;
@@ -1169,7 +1169,7 @@ void DrawVLineScrollLayer(int layerID) {
                     chunkYPos = 0;
 
                 chunkTileY = 0;
-                chunk      = (layer->tiles[chunkX + (chunkYPos << 8)] << 6) + tileX;
+                chunk      = (layer->tiles[chunkX + (chunkYPos * TILELAYER_CHUNK_W)] << 6) + tileX;
             }
             lineRemain -= TILE_SIZE;
 
@@ -1519,7 +1519,7 @@ void DrawVLineScrollLayer(int layerID) {
                     chunkYPos = 0;
 
                 chunkTileY = 0;
-                chunk      = (layer->tiles[chunkX + (chunkYPos << 8)] << 6) + tileX;
+                chunk      = (layer->tiles[chunkX + (chunkYPos * TILELAYER_CHUNK_W)] << 6) + tileX;
             }
 
             tilePxLineCnt = lineRemain >= TILE_SIZE ? TILE_SIZE : lineRemain;
