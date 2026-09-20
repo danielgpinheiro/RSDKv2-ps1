@@ -232,6 +232,14 @@ void RetroEngine::Init() {
 
     GameMode = ENGINE_EXITGAME;
     GameRunning  = false;
+#if RETRO_PLATFORM == RETRO_PS1
+    // Phase 3 milestone: no CD file I/O yet — skip LoadGameConfig and allocate
+    // the framebuffer directly so the render path can be exercised.
+    if (InitRenderDevice()) {
+        initialised = true;
+        GameRunning  = true;
+    }
+#else
     if (LoadGameConfig("Data/Game/GameConfig.bin")) {
         if (InitRenderDevice()) {
             if (InitSoundDevice()) {
@@ -242,6 +250,7 @@ void RetroEngine::Init() {
             }
         }
     }
+#endif
 
     // Calculate Skip frame
     int lower        = getLowerRate(targetRefreshRate, refreshRate);
