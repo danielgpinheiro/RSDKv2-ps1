@@ -42,6 +42,7 @@ ps1/libc/string.cpp \
 ps1/libc/stdlib.cpp \
 ps1/libc/math.cpp \
 ps1/libc/stdio.cpp \
+ps1/cdrom_fs.cpp \
 
 # Engine include dir (belt-and-suspenders; quote-includes resolve relative to the .cpp anyway).
 # ps1/libc comes FIRST: its C/C++ shim headers (<string>, <cmath>, <stdio.h>, ...)

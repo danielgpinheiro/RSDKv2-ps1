@@ -13,13 +13,17 @@
 
 #include <stddef.h>
 #include <stdarg.h>
+#include <stdint.h>
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
 typedef struct _FILE {
-    int _fd; /* reserved for the CD-ROM file descriptor in Phase 6 */
+    uint32_t lba;   /* ISO9660 extent start (sector) */
+    uint32_t size;  /* file size in bytes */
+    uint32_t pos;   /* current byte offset */
+    int      valid; /* nonzero while open */
 } FILE;
 
 #define SEEK_SET 0

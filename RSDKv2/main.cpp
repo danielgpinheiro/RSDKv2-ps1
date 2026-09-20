@@ -3,9 +3,11 @@
 #if RETRO_PLATFORM == RETRO_PS1
 #include <psyqo/application.hh>
 #include <psyqo/gpu.hh>
+#include <psyqo/cdrom-device.hh>
 #include "common/syscalls/syscalls.h"
 
-psyqo::GPU *g_ps1GPU = nullptr;
+psyqo::GPU         *g_ps1GPU   = nullptr;
+psyqo::CDRomDevice *g_ps1CDRom = nullptr;
 
 void PS1PresentFramebuffer(ushort *fb) {
     if (!g_ps1GPU)
@@ -17,6 +19,8 @@ void PS1PresentFramebuffer(ushort *fb) {
 
 class RSDKv2PS1App final : public psyqo::Application {
   public:
+    psyqo::CDRomDevice m_cdrom;
+
     void prepare() override {
         syscall_puts("[RSDKv2-PS1] boot ok; calling Engine.Init()\n");
 
@@ -28,6 +32,23 @@ class RSDKv2PS1App final : public psyqo::Application {
                              .set(psyqo::GPU::MiscSetting::CLEAR_VRAM));
 
         g_ps1GPU = &gpu();
+
+        m_cdrom.prepare();
+        m_cdrom.resetBlocking(gpu());
+        g_ps1CDRom = &m_cdrom;
+
+        // Phase 6 probe: verify CD-ROM file I/O (fopen/fread/fseek/ftell).
+        FILE *f = fopen("Data.bin", "rb");
+        if (f) {
+            uint8_t hdr[4];
+            size_t  n  = fread(hdr, 1, sizeof(hdr), f);
+            fseek(f, 0, SEEK_END);
+            long sz = ftell(f);
+            ramsyscall_printf("[RSDKv2-PS1] Data.bin open ok; read %d; size %d\n", (int)n, (int)sz);
+            fclose(f);
+        } else {
+            syscall_puts("[RSDKv2-PS1] Data.bin open FAILED\n");
+        }
 
         Engine.Init();
         syscall_puts("[RSDKv2-PS1] Engine.Init() returned (Phase 2 milestone)\n");
