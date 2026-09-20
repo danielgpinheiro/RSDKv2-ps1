@@ -1,6 +1,8 @@
 #include "RetroEngine.hpp"
 #include <cmath>
+#if RETRO_PLATFORM != RETRO_PS1
 #include <iostream>
+#endif
 
 int NoGlobalSFX = 0;
 int NoStageSFX  = 0;
@@ -403,6 +405,7 @@ void ProcessAudioMixing(Sint32 *dst, const Sint16 *src, int len, int volume, sby
 }
 #endif
 
+#if RETRO_PLATFORM != RETRO_PS1
 void LoadMusic(void *userdata)
 {
     (void)userdata;
@@ -463,6 +466,13 @@ void LoadMusic(void *userdata)
         trackBuffer  = -1;
     }
 }
+#else
+void LoadMusic(void *userdata)
+{
+    (void)userdata;
+    StopMusic();
+}
+#endif
 
 void SetMusicTrack(char *filePath, byte trackID, bool loop)
 {
@@ -486,7 +496,11 @@ bool PlayMusic(int track)
     }
     trackBuffer = track;
     musicStatus = MUSIC_LOADING;
+#if RETRO_PLATFORM != RETRO_PS1
     SDL_CreateThread((SDL_ThreadFunction)LoadMusic, "LoadMusic", NULL);
+#else
+    LoadMusic(NULL);
+#endif
     UnlockAudioDevice();
     return true;
 }

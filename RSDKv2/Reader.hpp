@@ -1,6 +1,8 @@
 #ifndef READER_H
 #define READER_H
 
+#include <stdlib.h>
+
 #ifdef FORCE_CASE_INSENSITIVE
 
 #include "fcaseopen.h"

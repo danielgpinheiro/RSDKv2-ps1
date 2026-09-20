@@ -192,6 +192,7 @@ bool getControllerButton(byte buttonID) {
 }
 #endif
 
+#if RETRO_USING_SDL2
 void controllerInit(byte controllerID) {
     SDL_GameController *controller = SDL_GameControllerOpen(controllerID);
     if (controller) {
@@ -211,6 +212,7 @@ void controllerClose(byte controllerID) {
         inputType = 0;
     }
 }
+#endif
 
 void ReadInputDevice() {
 #if RETRO_USING_SDL2

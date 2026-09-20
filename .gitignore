@@ -243,3 +243,11 @@ _Pvt_Extensions/
 ModelManifest.xml
 
 Ignored/
+
+# --- PS1 port build artifacts ---
+*.o
+*.dep
+*.s
+rsdkv2.ps-exe
+rsdkv2.elf
+.hermes/

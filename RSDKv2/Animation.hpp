@@ -2,8 +2,13 @@
 #define ANIMATION_H
 
 #define ANIFILE_COUNT (0x100)
+#if RETRO_PLATFORM == RETRO_PS1
+#define ANIMATION_COUNT (0x200)
+#define SPRITEFRAME_COUNT (0x800)
+#else
 #define ANIMATION_COUNT (0x400)
 #define SPRITEFRAME_COUNT (0x1000)
+#endif
 
 #define HITBOX_COUNT (0x20)
 #define HITBOX_DIR_COUNT (0x8)

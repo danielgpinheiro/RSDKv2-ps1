@@ -25,6 +25,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <cmath>
+#include <ctype.h>
 
 // ================
 // STANDARD TYPES
@@ -44,6 +45,7 @@ typedef unsigned int uint;
 #define RETRO_WP7      (6)
 // Custom Platforms start here
 #define RETRO_UWP (7)
+#define RETRO_PS1 (8)
 
 // Platform types (Game manages platform-specific code such as HUD position using this rather than the above)
 #define RETRO_STANDARD (0)
@@ -74,8 +76,17 @@ typedef unsigned int uint;
 #else
 #error "Unknown Apple platform"
 #endif
+#elif defined __mips__
+#define RETRO_PLATFORM (RETRO_PS1)
 #else
 #define RETRO_PLATFORM (RETRO_WIN) // Default
+#endif
+
+// PS1 port: the mod loader needs a writable filesystem + std::filesystem +
+// std::map/unordered_map, none of which the port provides yet. Force it off.
+#if RETRO_PLATFORM == RETRO_PS1
+#undef RETRO_USE_MOD_LOADER
+#define RETRO_USE_MOD_LOADER (0)
 #endif
 
 #if RETRO_PLATFORM == RETRO_UWP

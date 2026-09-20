@@ -3,7 +3,11 @@
 
 #define SPRITESHEETS_MAX (16)
 #define SURFACE_MAX      (24)
+#if RETRO_PLATFORM == RETRO_PS1
+#define GFXDATA_MAX      (0x20000)
+#else
 #define GFXDATA_MAX      (0x400000)
+#endif
 
 #define DRAWLAYER_COUNT (0x7)
 

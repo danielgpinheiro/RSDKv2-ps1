@@ -1,5 +1,6 @@
 #include "RetroEngine.hpp"
 #include <string>
+#include <algorithm>
 
 char binFileName[0x400];
 

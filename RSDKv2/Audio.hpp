@@ -3,10 +3,26 @@
 
 #include <stdlib.h>
 
+#if RETRO_PLATFORM != RETRO_PS1
 #include <vorbis/vorbisfile.h>
+#endif
 
-#if RETRO_PLATFORM != RETRO_VITA
+#if RETRO_PLATFORM != RETRO_VITA && RETRO_PLATFORM != RETRO_PS1
 #include "SDL.h"
+#endif
+
+// PS1 port: audio is stubbed for Phase 2. Provide the SDL/vorbis types and a
+// no-op OggVorbis_File so the data structures and freeMusInfo() still compile.
+#if RETRO_PLATFORM == RETRO_PS1
+#include <stdint.h>
+typedef int16_t Sint16;
+typedef int32_t Sint32;
+typedef uint8_t Uint8;
+typedef uint16_t Uint16;
+typedef struct { int unused; } OggVorbis_File;
+#define SDL_LockAudio()   ((void)0)
+#define SDL_UnlockAudio() ((void)0)
+#define ov_clear(f)       ((void)0)
 #endif
 
 #define TRACK_COUNT (0x10)
@@ -115,9 +131,9 @@ inline void freeMusInfo()
     }
 }
 #else
-void ProcessMusicStream() {}
-void ProcessAudioPlayback() {}
-void ProcessAudioMixing() {}
+inline void ProcessMusicStream() {}
+inline void ProcessAudioPlayback() {}
+inline void ProcessAudioMixing() {}
 
 inline void freeMusInfo()
 {

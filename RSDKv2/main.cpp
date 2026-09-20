@@ -1,5 +1,24 @@
 #include "RetroEngine.hpp"
 
+#if RETRO_PLATFORM == RETRO_PS1
+#include <psyqo/application.hh>
+#include "common/syscalls/syscalls.h"
+
+class RSDKv2PS1App final : public psyqo::Application {
+  public:
+    void prepare() override {
+        syscall_puts("[RSDKv2-PS1] boot ok; calling Engine.Init()\n");
+        Engine.Init();
+        syscall_puts("[RSDKv2-PS1] Engine.Init() returned (Phase 2 milestone)\n");
+    }
+    void frame() override {
+        // Phase 2: graphics/input/sound not yet ported; idle this frame.
+    }
+};
+
+static RSDKv2PS1App rsdkv2App;
+#endif
+
 #if !RETRO_USE_ORIGINAL_CODE
 
 #if RETRO_PLATFORM == RETRO_WIN && _MSC_VER
@@ -49,6 +68,11 @@ void parseArguments(int argc, char *argv[]) {
 
 int main(int argc, char *argv[])
 {
+#if RETRO_PLATFORM == RETRO_PS1
+    (void)argc;
+    (void)argv;
+    return rsdkv2App.run();
+#else
 #if !RETRO_USE_ORIGINAL_CODE
     parseArguments(argc, argv);
 #endif
@@ -65,4 +89,5 @@ int main(int argc, char *argv[])
 #endif
 
     return 0;
+#endif
 }

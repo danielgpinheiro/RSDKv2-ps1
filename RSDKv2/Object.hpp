@@ -1,7 +1,11 @@
 #ifndef OBJECT_H
 #define OBJECT_H
 
+#if RETRO_PLATFORM == RETRO_PS1
+#define ENTITY_COUNT (0x200)
+#else
 #define ENTITY_COUNT (0x4A0)
+#endif
 #define TEMPENTITY_START (ENTITY_COUNT - 0x80)
 #define OBJECT_COUNT (0x100)
 

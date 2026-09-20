@@ -1,8 +1,13 @@
 #ifndef SCRIPT_H
 #define SCRIPT_H
 
+#if RETRO_PLATFORM == RETRO_PS1
+#define SCRIPTDATA_COUNT (0x4000)
+#define JUMPTABLE_COUNT  (0x1000)
+#else
 #define SCRIPTDATA_COUNT (0x40000)
 #define JUMPTABLE_COUNT  (0x4000)
+#endif
 #define JUMPSTACK_COUNT (0x400)
 
 struct ScriptPtr {
