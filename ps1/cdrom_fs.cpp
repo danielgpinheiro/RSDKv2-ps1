@@ -21,8 +21,10 @@ extern psyqo::CDRomDevice *g_ps1CDRom;
 extern psyqo::GPU         *g_ps1GPU;
 
 #define ISO_SECTOR 2048
+#define SECTOR_BATCH 16 /* read up to 16 consecutive sectors (32KB) per blocking call */
 
 static uint8_t s_sec[ISO_SECTOR];
+static uint8_t s_batch[SECTOR_BATCH * ISO_SECTOR];
 
 static bool readSector(uint32_t lba) {
     return g_ps1CDRom->readSectorsBlocking(lba, 1, s_sec, *g_ps1GPU);
@@ -126,17 +128,25 @@ size_t fread(void *ptr, size_t size, size_t nmemb, FILE *f) {
     if (f->pos + want > f->size)
         want = f->size - f->pos;
 
-    uint8_t *dst      = (uint8_t *)ptr;
+    uint8_t *dst       = (uint8_t *)ptr;
     size_t   remaining = want;
     while (remaining > 0) {
-        uint32_t sector = f->lba + (f->pos / ISO_SECTOR);
-        uint32_t off    = f->pos % ISO_SECTOR;
-        uint32_t chunk  = ISO_SECTOR - off;
-        if (chunk > remaining)
-            chunk = (uint32_t)remaining;
-        if (!readSector(sector))
+        uint32_t sector     = f->lba + (f->pos / ISO_SECTOR);
+        uint32_t off        = f->pos % ISO_SECTOR;
+        uint32_t lastSector = f->lba + (f->size + ISO_SECTOR - 1) / ISO_SECTOR;
+        uint32_t sectors    = (off + (uint32_t)remaining + ISO_SECTOR - 1) / ISO_SECTOR;
+        if (sectors > SECTOR_BATCH)
+            sectors = SECTOR_BATCH;
+        uint32_t maxSectors = lastSector - sector;
+        if (sectors > maxSectors)
+            sectors = maxSectors;
+        if (sectors == 0)
             break;
-        memcpy(dst, s_sec + off, chunk);
+        if (!g_ps1CDRom->readSectorsBlocking(sector, sectors, s_batch, *g_ps1GPU))
+            break;
+        uint32_t avail = sectors * ISO_SECTOR - off;
+        uint32_t chunk = (avail < remaining) ? avail : (uint32_t)remaining;
+        memcpy(dst, s_batch + off, chunk);
         dst += chunk;
         f->pos += chunk;
         remaining -= chunk;

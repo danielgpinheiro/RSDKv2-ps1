@@ -37,35 +37,12 @@ class RSDKv2PS1App final : public psyqo::Application {
         m_cdrom.resetBlocking(gpu());
         g_ps1CDRom = &m_cdrom;
 
-        // Phase 6 probe: verify CD-ROM file I/O (fopen/fread/fseek/ftell).
-        FILE *f = fopen("Data.bin", "rb");
-        if (f) {
-            uint8_t hdr[4];
-            size_t  n  = fread(hdr, 1, sizeof(hdr), f);
-            fseek(f, 0, SEEK_END);
-            long sz = ftell(f);
-            ramsyscall_printf("[RSDKv2-PS1] Data.bin open ok; read %d; size %d\n", (int)n, (int)sz);
-            fclose(f);
-        } else {
-            syscall_puts("[RSDKv2-PS1] Data.bin open FAILED\n");
-        }
-
         Engine.Init();
-        syscall_puts("[RSDKv2-PS1] Engine.Init() returned (Phase 2 milestone)\n");
-
-        // Phase 3 test: grayscale palette + horizontal-gradient framebuffer.
-        for (int i = 0; i < 256; ++i)
-            SetPaletteEntry((byte)i, (byte)i, (byte)i, (byte)i);
-        for (int yy = 0; yy < SCREEN_YSIZE; ++yy)
-            for (int xx = 0; xx < DEFAULT_SCREEN_XSIZE; ++xx)
-                Engine.FrameBuffer[yy * DEFAULT_SCREEN_XSIZE + xx] = (byte)(xx & 0xFF);
+        syscall_puts("[RSDKv2-PS1] Engine.Init() returned\n");
     }
 
     void frame() override {
-        // Task 1.3 verification: route the blit through FlipScreen().
-        Engine.ColourMode = 1;               // 16-bit path (FlipScreen case 1)
-        Engine.GameMode   = ENGINE_MAINGAME; // != EXITGAME so FlipScreen runs
-        FlipScreen();
+        Engine.RunFrame();
     }
 };
 

@@ -496,7 +496,9 @@ void GenerateTintTable(short alpha, short a2, byte type, byte a4, byte a5, byte 
 }
 
 void DrawHLineScrollLayer(int layerID) {
-    TileLayer *layer   = &StageLayouts[activeTileLayers[layerID]];
+    TileLayer *layer = &StageLayouts[activeTileLayers[layerID]];
+    if (!layer->xsize || !layer->ysize)
+        return;
     int screenwidth16  = (SCREEN_XSIZE >> 4) - 1;
     int layerwidth     = layer->xsize;
     int layerheight    = layer->ysize;
