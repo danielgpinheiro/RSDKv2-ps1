@@ -11,6 +11,13 @@
 
 #define DRAWLAYER_COUNT (0x7)
 
+#if RETRO_PLATFORM == RETRO_PS1
+namespace psyqo {
+class GPU;
+}
+extern psyqo::GPU *g_ps1GPU;
+#endif
+
 enum FlipFlags { FLIP_NONE, FLIP_X, FLIP_Y, FLIP_XY };
 enum InkFlags { INK_NONE, INK_BLEND, INK_TINT };
 enum DrawFXFlags { FX_SCALE, FX_ROTATE, FX_INK, FX_TINT };
@@ -25,6 +32,10 @@ struct GFXSurface {
     int height;
     int width;
     int dataPosition;
+#if RETRO_PLATFORM == RETRO_PS1
+    int vramPageX; // texture page X (N*64 halfwords); -1 = not uploaded
+    int vramPageY; // texture page Y (N*256 lines)
+#endif
 };
 
 extern int SCREEN_XSIZE;
@@ -46,6 +57,12 @@ extern byte GraphicData[GFXDATA_MAX];
 int InitRenderDevice();
 void FlipScreen();
 void PS1PresentFramebuffer(ushort *fb);
+#if RETRO_PLATFORM == RETRO_PS1
+void PS1UploadPalette();
+void PS1UploadSpriteSheet(int sheetID);
+void PS1ResetSpriteVRAM();
+void PS1TileSelfTest();
+#endif
 void ReleaseRenderDevice();
 
 void ClearScreen(byte index);
@@ -55,6 +72,10 @@ inline void ClearGraphicsData() {
     GfxDataPosition = 0;
 #if !RETRO_USE_ORIGINAL_CODE
     MEM_ZERO(GfxSurface);
+#endif
+#if RETRO_PLATFORM == RETRO_PS1
+    for (int i = 0; i < SURFACE_MAX; ++i) GfxSurface[i].vramPageX = -1;
+    PS1ResetSpriteVRAM();
 #endif
 }
 

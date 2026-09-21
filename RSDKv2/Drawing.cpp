@@ -17,6 +17,201 @@ int GfxDataPosition;
 GFXSurface GfxSurface[SURFACE_MAX];
 byte GraphicData[GFXDATA_MAX];
 
+#if RETRO_PLATFORM == RETRO_PS1
+#include <psyqo/gpu.hh>
+#include <psyqo/primitives/common.hh>
+#include <psyqo/primitives/control.hh>
+#include <psyqo/primitives/sprites.hh>
+
+// VRAM layout (1MB, 1024x512 16-bit halfwords):
+//  - framebuffer 320x240 at Y=0 (buf0) and Y=256 (buf1), X=0-319 halfwords (psyqo default)
+//  - CLUT (256x1, 15-bit) at (X=0, Y=240) -- the 16-line gap below buf0
+//  - sprite pages at pageX=5,7 (X base 320,448) x pageY=0,1 (Y 0,256)
+//  - tile pages at pageX=9,11 (X base 576,704) x pageY=0 (Y 0) -- 2 pages = 512 tiles
+//    Page X base = pageX*64 halfwords (NOT pixels); a page is 128 halfwords = 256 texels.
+//    Must start at >=320 halfwords to clear the framebuffer (X=0-319).
+#define PS1_CLUT_X 0
+#define PS1_CLUT_Y 240
+static int ps1PageSlotIdx = 0;
+static const int ps1PageSlotX[4] = { 5, 7, 5, 7 };
+static const int ps1PageSlotY[4] = { 0, 0, 1, 1 };
+#define PS1_TILE_PAGE_X 9
+#define PS1_TILE_PAGE_Y 0
+static bool ps1TileSetUploaded = false;
+static int ps1TileCurPage = -1;
+static int ps1CurPageX = -1;
+static int ps1CurPageY = -1;
+
+static bool PS1AllocPages(int pagesX, int *outX, int *outY) {
+    if (pagesX < 1 || pagesX > 2 || ps1PageSlotIdx + pagesX > 4)
+        return false;
+    *outX = ps1PageSlotX[ps1PageSlotIdx];
+    *outY = ps1PageSlotY[ps1PageSlotIdx];
+    ps1PageSlotIdx += pagesX;
+    return true;
+}
+
+void PS1UploadPalette() {
+    static uint16_t clut[256];
+    // Honour the RSDKv2 palette fade: when PaletteMode is set, use the faded
+    // palette (TilePaletteF, updated by SetFade) instead of the normal one.
+    const Colour *pal = PaletteMode ? TilePaletteF : TilePalette;
+    for (int i = 0; i < 256; ++i) {
+        byte r = pal[i].r, g = pal[i].g, b = pal[i].b;
+        uint16_t c = (uint16_t)(((r >> 3)) | ((g >> 3) << 5) | ((b >> 3) << 10));
+        if (i == 0)
+            c = 0x0000; // index 0 = transparent (matches RSDKv2 sprite transparency)
+        else if (c == 0x0000)
+            c = 0x8000; // visible black -> non-transparent black for opaque commands
+        clut[i] = c;
+    }
+    g_ps1GPU->uploadToVRAM(clut, psyqo::Rect{{PS1_CLUT_X, PS1_CLUT_Y}, {256, 1}});
+}
+
+void PS1ResetSpriteVRAM() {
+    ps1PageSlotIdx = 0;
+    ps1CurPageX    = -1;
+    ps1CurPageY    = -1;
+    ps1TileCurPage = -1;
+}
+
+// Re-pack the 16-wide tile strip into 16x16 tile grids and upload as 8-bit pages.
+// TileGfx layout: tile N is a CONTIGUOUS 16x16 block at byte offset N*256
+// (gfxDataPos = tileIndex << 8), 16 bytes/row stride.
+void PS1UploadTileSet() {
+    if (ps1TileSetUploaded)
+        return;
+    const int tilesPerPage = 256;
+    int pageCount          = (TILE_COUNT + tilesPerPage - 1) / tilesPerPage; // 2
+    static uint16_t row[128];                                                // 256 texels = 128 halfwords
+    for (int page = 0; page < pageCount; ++page) {
+        int px        = PS1_TILE_PAGE_X + 2 * page; // pageX 9, 11
+        int vramHalfX = px * 64;
+        int vramY     = PS1_TILE_PAGE_Y * 256;
+        for (int ty = 0; ty < 256; ++ty) {
+            int gridRow = ty >> 4;
+            int y       = ty & 0xF;
+            for (int halfX = 0; halfX < 128; ++halfX) {
+                int tx0  = halfX << 1;
+                int col0 = tx0 >> 4, x0 = tx0 & 0xF;
+                int n0   = page * tilesPerPage + (gridRow << 4) + col0;
+                int col1 = (tx0 + 1) >> 4, x1 = (tx0 + 1) & 0xF;
+                int n1   = page * tilesPerPage + (gridRow << 4) + col1;
+                byte lo  = (n0 < TILE_COUNT) ? TileGfx[n0 * 256 + y * 16 + x0] : 0;
+                byte hi  = (n1 < TILE_COUNT) ? TileGfx[n1 * 256 + y * 16 + x1] : 0;
+                row[halfX] = (uint16_t)(lo | (hi << 8));
+            }
+            g_ps1GPU->uploadToVRAM(row, psyqo::Rect{{vramHalfX, vramY + ty}, {128, 1}});
+        }
+    }
+    ps1TileSetUploaded = true;
+}
+
+// Draw one 16x16 tile as a Sprite16x16. tileIndex is StageTiles.tileIndex[].
+static void PS1DrawTileQuad(int screenX, int screenY, int tileIndex) {
+    if (tileIndex <= 0)           // tile 0 = transparent/empty
+        return;
+    int page  = tileIndex >> 8;   // 0 or 1 (512 tiles / 256 per page)
+    int pt    = tileIndex & 0xFF; // 0..255 within the page
+    int u     = (pt & 0xF) << 4;  // 16 * (pt % 16)
+    int v     = (pt >> 4) << 4;   // 16 * (pt / 16)
+    int pageX = PS1_TILE_PAGE_X + (page << 1); // 9 or 11
+
+    if (pageX != ps1TileCurPage) {
+        psyqo::Prim::TPage tp;
+        tp.attr.set(psyqo::Prim::TPageAttr::ColorMode::Tex8Bits);
+        tp.attr.setPageX((uint8_t)pageX);
+        tp.attr.setPageY((uint8_t)PS1_TILE_PAGE_Y);
+        g_ps1GPU->sendPrimitive(tp);
+        ps1TileCurPage = pageX;
+    }
+
+    psyqo::Prim::Sprite16x16 s(psyqo::Color{{.r = 0x80, .g = 0x80, .b = 0x80}});
+    s.position = psyqo::Vertex{{.x = (int16_t)screenX, .y = (int16_t)screenY}};
+    s.texInfo  = psyqo::PrimPieces::TexInfo{(uint8_t)u, (uint8_t)v,
+                   psyqo::PrimPieces::ClutIndex(psyqo::Vertex{{.x = PS1_CLUT_X, .y = PS1_CLUT_Y}})};
+    g_ps1GPU->sendPrimitive(s);
+}
+
+// Minimal flat tile renderer: draws the layer grid at scroll 0, no flip/deform/water.
+static void PS1DrawTileLayer(int layerID) {
+    TileLayer *layer = &StageLayouts[activeTileLayers[layerID]];
+    if (!layer->xsize || !layer->ysize)
+        return;
+    int xsize = layer->xsize; // in 128x128 chunks
+    int ysize = layer->ysize;
+    for (int cy = 0; cy < ysize; ++cy) {
+        for (int cx = 0; cx < xsize; ++cx) {
+            int chunkIndex = layer->tiles[cy * TILELAYER_CHUNK_W + cx];
+            for (int sy = 0; sy < 8; ++sy) {
+                for (int sx = 0; sx < 8; ++sx) {
+                    int chunk = (chunkIndex << 6) + sx + (sy << 3);
+                    int tile  = StageTiles.tileIndex[chunk];
+                    if (tile == 0)
+                        continue;
+                    int screenX = (cx << 7) + (sx << 4);
+                    int screenY = (cy << 7) + (sy << 4);
+                    if (screenX < -16 || screenX >= SCREEN_XSIZE || screenY < -16 || screenY >= SCREEN_YSIZE)
+                        continue;
+                    PS1DrawTileQuad(screenX, screenY, tile);
+                }
+            }
+        }
+    }
+}
+
+static bool ps1TileTestInit = false;
+
+// Self-contained tile-path test: fill a synthetic tile, upload it, draw it every
+// frame. Bypasses Engine.Init() and the script VM entirely. Temporary for Phase 2.
+void PS1TileSelfTest() {
+    g_ps1GPU->clear();
+
+    if (!ps1TileTestInit) {
+        TilePalette[1].r = 255; TilePalette[1].g = 0; TilePalette[1].b = 0;   // red
+        TilePalette[2].r = 0;   TilePalette[2].g = 0; TilePalette[2].b = 255; // blue
+        for (int y = 0; y < 16; ++y)
+            for (int x = 0; x < 16; ++x)
+                TileGfx[256 + y * 16 + x] = (byte)((((x >> 2) + (y >> 2)) & 1) ? 2 : 1);
+        PS1UploadTileSet();
+        ps1TileTestInit = true;
+    }
+
+    PS1UploadPalette();
+    PS1DrawTileQuad(100, 100, 1);
+}
+
+void PS1UploadSpriteSheet(int sheetID) {
+    GFXSurface *s = &GfxSurface[sheetID];
+    if (s->width <= 0 || s->height <= 0 || s->vramPageX >= 0)
+        return;
+    int pagesX = (s->width + 255) / 256;
+    if (pagesX > 2 || s->height > 256)
+        return; // too big for the GPU path; CPU fallback handles it
+    int px, py;
+    if (!PS1AllocPages(pagesX, &px, &py))
+        return; // out of texture pages; CPU fallback handles it
+    s->vramPageX = px;
+    s->vramPageY = py;
+
+    // Pack 8-bit indices into 16-bit halfwords (2 texels per halfword) and upload row by row.
+    const byte *src = &GraphicData[s->dataPosition];
+    int halfW      = (s->width + 1) / 2;
+    int vramHalfX  = px * 64; // pageX * 64 halfwords
+    int vramY      = py * 256;
+    static uint16_t row[256];
+    for (int y = 0; y < s->height; ++y) {
+        for (int x = 0; x < halfW; ++x) {
+            int i   = y * s->width + x * 2;
+            byte lo = src[i];
+            byte hi = (x * 2 + 1 < s->width) ? src[i + 1] : 0;
+            row[x]  = (uint16_t)(lo | (hi << 8));
+        }
+        g_ps1GPU->uploadToVRAM(row, psyqo::Rect{{vramHalfX, vramY + y}, {halfW, 1}});
+    }
+}
+#endif
+
 int InitRenderDevice() {
     char gameTitle[0x40];
 
@@ -244,12 +439,8 @@ void FlipScreen() {
             }
 
 #if RETRO_PLATFORM == RETRO_PS1
-            // PS1: convert RGB565 -> BGR555 and upload to the current VRAM buffer.
-            for (int i = 0; i < SCREEN_XSIZE * SCREEN_YSIZE; ++i) {
-                ushort px      = frameBuffer[i];
-                frameBuffer[i] = (ushort)(((px & 0x1F) << 10) | ((((px >> 5) & 0x3F) >> 1) << 5) | ((px >> 11) & 0x1F));
-            }
-            PS1PresentFramebuffer(frameBuffer);
+            // GPU path: DrawStageGfx renders directly into VRAM via sendPrimitive;
+            // the 8-bit CPU framebuffer is not uploaded (would overwrite the GPU output).
 #elif RETRO_USING_SDL2
             SDL_LockTexture(Engine.screenBuffer, NULL, &pixels, &pitch);
             memcpy(pixels, frameBuffer, pitch * SCREEN_YSIZE);
@@ -382,45 +573,70 @@ void DrawObjectList(int Layer) {
     }
 }
 void DrawStageGfx() {
+#if RETRO_PLATFORM == RETRO_PS1
+    if (g_ps1GPU) {
+        g_ps1GPU->clear();
+        PS1UploadPalette();
+        PS1UploadTileSet();
+        ps1CurPageX = -1;
+        ps1CurPageY = -1;
+    }
+#endif
     DrawObjectList(0);
     if (activeTileLayers[0] < LAYER_COUNT) {
+#if RETRO_PLATFORM == RETRO_PS1
+        PS1DrawTileLayer(0);
+#else
         switch (StageLayouts[activeTileLayers[0]].type) {
             case LAYER_HSCROLL: DrawHLineScrollLayer(0); break;
             case LAYER_VSCROLL: DrawVLineScrollLayer(0); break;
             case LAYER_3DCLOUD: Draw3DCloudLayer(0); break;
             default: break;
         }
+#endif
     }
 
     DrawObjectList(1);
     if (activeTileLayers[1] < LAYER_COUNT) {
+#if RETRO_PLATFORM == RETRO_PS1
+        PS1DrawTileLayer(1);
+#else
         switch (StageLayouts[activeTileLayers[1]].type) {
             case LAYER_HSCROLL: DrawHLineScrollLayer(1); break;
             case LAYER_VSCROLL: DrawVLineScrollLayer(1); break;
             case LAYER_3DCLOUD: Draw3DCloudLayer(1); break;
             default: break;
         }
+#endif
     }
 
     DrawObjectList(2);
     if (activeTileLayers[2] < LAYER_COUNT) {
+#if RETRO_PLATFORM == RETRO_PS1
+        PS1DrawTileLayer(2);
+#else
         switch (StageLayouts[activeTileLayers[2]].type) {
             case LAYER_HSCROLL: DrawHLineScrollLayer(2); break;
             case LAYER_VSCROLL: DrawVLineScrollLayer(2); break;
             case LAYER_3DCLOUD: Draw3DCloudLayer(2); break;
             default: break;
         }
+#endif
     }
 
     DrawObjectList(3);
     DrawObjectList(4);
     if (activeTileLayers[3] < LAYER_COUNT) {
+#if RETRO_PLATFORM == RETRO_PS1
+        PS1DrawTileLayer(3);
+#else
         switch (StageLayouts[activeTileLayers[3]].type) {
             case LAYER_HSCROLL: DrawHLineScrollLayer(3); break;
             case LAYER_VSCROLL: DrawVLineScrollLayer(3); break;
             case LAYER_3DCLOUD: Draw3DCloudLayer(3); break;
             default: break;
         }
+#endif
     }
 
     DrawObjectList(5);
@@ -1759,6 +1975,49 @@ void DrawSprite(int XPos, int YPos, int width, int height, int sprX, int sprY, i
     }
     if (width <= 0 || height <= 0)
         return;
+
+#if RETRO_PLATFORM == RETRO_PS1
+    if (g_ps1GPU) {
+        GFXSurface *surface = &GfxSurface[sheetID];
+        if (surface->vramPageX < 0 && surface->width > 0 && surface->height > 0)
+            PS1UploadSpriteSheet(sheetID);
+        if (surface->vramPageX >= 0) {
+            int basePageX = surface->vramPageX;
+            int basePageY = surface->vramPageY;
+            int x         = sprX;
+            int remaining = width;
+            int drawX     = XPos;
+            while (remaining > 0) {
+                int chunkW = remaining;
+                int maxW   = 256 - (x & 0xFF);
+                if (chunkW > maxW)
+                    chunkW = maxW;
+                int pageX = basePageX + 2 * (x / 256);
+                int u     = x & 0xFF;
+                if (pageX != ps1CurPageX || basePageY != ps1CurPageY) {
+                    psyqo::Prim::TPage tp;
+                    tp.attr.set(psyqo::Prim::TPageAttr::ColorMode::Tex8Bits);
+                    tp.attr.setPageX((uint8_t)pageX);
+                    tp.attr.setPageY((uint8_t)basePageY);
+                    tp.attr.set(psyqo::Prim::TPageAttr::SemiTrans::HalfBackAndHalfFront);
+                    g_ps1GPU->sendPrimitive(tp);
+                    ps1CurPageX = pageX;
+                    ps1CurPageY = basePageY;
+                }
+                psyqo::Prim::Sprite s(psyqo::Color{{.r = 0x80, .g = 0x80, .b = 0x80}});
+                s.position = psyqo::Vertex{{.x = (int16_t)drawX, .y = (int16_t)YPos}};
+                s.size     = psyqo::Vertex{{.w = (int16_t)chunkW, .h = (int16_t)height}};
+                s.texInfo  = psyqo::PrimPieces::TexInfo{(uint8_t)u, (uint8_t)sprY,
+                                                        psyqo::PrimPieces::ClutIndex(psyqo::Vertex{{.x = PS1_CLUT_X, .y = PS1_CLUT_Y}})};
+                g_ps1GPU->sendPrimitive(s);
+                x += chunkW;
+                drawX += chunkW;
+                remaining -= chunkW;
+            }
+            return;
+        }
+    }
+#endif
 
     GFXSurface *surface  = &GfxSurface[sheetID];
     int pitch            = SCREEN_XSIZE - width;
