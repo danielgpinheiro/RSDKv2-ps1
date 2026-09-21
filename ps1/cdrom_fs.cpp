@@ -34,65 +34,88 @@ static uint32_t le32(const uint8_t *p) {
     return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
 }
 
-/* Case-insensitive compare of `name` (RSDKv2 uses lowercase paths) vs an
- * ISO9660 entry name of `len` bytes (stored uppercase, may carry a ";1"
- * version suffix). */
-static bool nameMatches(const char *name, const uint8_t *entryName, int len) {
-    const char *n = name;
-    int         i = 0;
-    for (; i < len && *n; ++i, ++n) {
-        char e = entryName[i];
+/* Case-insensitive compare of a bounded path component `name` (nameLen bytes)
+ * vs an ISO9660 entry name of entryLen bytes (stored uppercase, may carry a
+ * ";1" version suffix). */
+static bool nameMatchesBounded(const char *name, int nameLen, const uint8_t *entryName, int entryLen) {
+    int i = 0, j = 0;
+    while (i < nameLen && j < entryLen) {
+        char e = (char)entryName[j];
         if (e == ';')
-            return *n == 0; /* version suffix -> end of name */
-        char lo = (*n >= 'A' && *n <= 'Z') ? (*n - 'A' + 'a') : *n;
-        char el = (e >= 'A' && e <= 'Z') ? (e - 'A' + 'a') : e;
+            return i == nameLen; /* version suffix -> component must end here */
+        char lo = name[i];
+        if (lo >= 'A' && lo <= 'Z') lo += 'a' - 'A';
+        char el = e;
+        if (el >= 'A' && el <= 'Z') el += 'a' - 'A';
         if (lo != el)
             return false;
+        ++i; ++j;
     }
-    return *n == 0; /* both names fully consumed */
+    return i == nameLen; /* component fully consumed */
 }
 
-/* Find a root-level file, filling lba/size. Returns false if not found. */
-static bool findRootFile(const char *path, uint32_t *outLba, uint32_t *outSize) {
-    const char *name = path;
-    for (const char *p = path; *p; ++p) {
-        if (*p == '/')
-            name = p + 1;
-    }
-
+/* Find a file by a nested path (e.g. "Data/Stages/SSZ/Act1.bin"), walking the
+ * ISO9660 directory tree. Fills lba/size. Returns false if not found. */
+static bool findFile(const char *path, uint32_t *outLba, uint32_t *outSize) {
     if (!readSector(16)) /* Primary Volume Descriptor */
         return false;
     /* Root directory record is at PVD offset 156. */
-    uint32_t rootLba  = le32(s_sec + 156 + 2);
-    uint32_t rootSize = le32(s_sec + 156 + 10);
+    uint32_t dirLba  = le32(s_sec + 156 + 2);
+    uint32_t dirSize = le32(s_sec + 156 + 10);
 
-    uint32_t remaining = rootSize;
-    uint32_t sector    = rootLba;
-    while (remaining > 0) {
-        if (!readSector(sector))
-            return false;
-        const uint8_t *p   = s_sec;
-        const uint8_t *end = s_sec + ISO_SECTOR;
-        while (p < end) {
-            uint8_t recLen = p[0];
-            if (recLen == 0) { /* padding to sector boundary */
-                remaining -= (uint32_t)(end - p);
-                break;
-            }
-            if (recLen < 34) /* malformed */
-                return false;
-            uint8_t nameLen = p[32];
-            if (nameMatches(name, p + 33, nameLen)) {
-                *outLba  = le32(p + 2);
-                *outSize = le32(p + 10);
-                return true;
-            }
-            p += recLen;
-            remaining -= recLen;
+    const char *p = path;
+    while (true) {
+        const char *name = p;
+        while (*p && *p != '/') ++p;
+        int  nameLen = (int)(p - name);
+        bool last    = (*p == 0);
+        if (*p == '/') ++p;
+
+        if (nameLen == 0) { /* empty component (leading/trailing slash) */
+            if (last) return false;
+            continue;
         }
-        ++sector;
+
+        bool     found     = false;
+        uint32_t remaining = dirSize;
+        uint32_t sector    = dirLba;
+        while (remaining > 0 && !found) {
+            if (!readSector(sector))
+                return false;
+            const uint8_t *q   = s_sec;
+            const uint8_t *end = s_sec + ISO_SECTOR;
+            while (q < end) {
+                uint8_t recLen = q[0];
+                if (recLen == 0) { /* padding to sector boundary */
+                    remaining -= (uint32_t)(end - q);
+                    break;
+                }
+                if (recLen < 34) /* malformed */
+                    return false;
+                uint8_t nlen = q[32];
+                if (nameMatchesBounded(name, nameLen, q + 33, nlen)) {
+                    uint32_t lba   = le32(q + 2);
+                    uint32_t sz    = le32(q + 10);
+                    uint8_t  flags = q[25];
+                    bool     isDir = (flags & 2) != 0;
+                    if (last) {
+                        if (isDir) return false; /* expecting a file */
+                        *outLba = lba; *outSize = sz;
+                        return true;
+                    }
+                    if (!isDir) return false; /* expecting a directory */
+                    dirLba = lba; dirSize = sz;
+                    found = true;
+                    break;
+                }
+                q += recLen;
+                remaining -= recLen;
+            }
+            ++sector;
+        }
+        if (!found)
+            return false;
     }
-    return false;
 }
 
 FILE *fopen(const char *path, const char *mode) {
@@ -100,7 +123,7 @@ FILE *fopen(const char *path, const char *mode) {
     uint32_t lba, size;
     if (!g_ps1CDRom || !g_ps1GPU)
         return nullptr;
-    if (!findRootFile(path, &lba, &size))
+    if (!findFile(path, &lba, &size))
         return nullptr;
     FILE *f = (FILE *)malloc(sizeof(FILE));
     if (!f)
