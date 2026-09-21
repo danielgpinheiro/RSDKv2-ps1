@@ -2,8 +2,8 @@
 #define SCRIPT_H
 
 #if RETRO_PLATFORM == RETRO_PS1
-#define SCRIPTDATA_COUNT (0x4000)
-#define JUMPTABLE_COUNT  (0x1000)
+#define SCRIPTDATA_COUNT (0x8000) // was 0x4000 — SSZ bytecode is ~22.4k ints, overflows
+#define JUMPTABLE_COUNT  (0x2000) // was 0x1000 — bump for headroom
 #else
 #define SCRIPTDATA_COUNT (0x40000)
 #define JUMPTABLE_COUNT  (0x4000)
