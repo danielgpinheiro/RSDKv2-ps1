@@ -210,7 +210,12 @@ void FlipScreen() {
         }
         case 1: // 16-bit
         {
+#if RETRO_PLATFORM == RETRO_PS1
+            static ushort ps1FrameBuffer[320 * 240]; // SCREEN_XSIZE/YSIZE are runtime vars; screen is fixed 320x240
+            ushort *frameBuffer = ps1FrameBuffer;
+#else
             ushort *frameBuffer = new ushort[SCREEN_XSIZE * SCREEN_YSIZE];
+#endif
             memset(frameBuffer, 0, (SCREEN_XSIZE * SCREEN_YSIZE) * sizeof(ushort));
             if (PaletteMode) {
                 for (int y = 0; y < waterDrawPos; ++y) {
@@ -250,8 +255,10 @@ void FlipScreen() {
             memcpy(pixels, frameBuffer, pitch * SCREEN_YSIZE);
             SDL_UnlockTexture(Engine.screenBuffer);
 #endif
+#if !RETRO_PLATFORM
             if (frameBuffer)
                 delete[] frameBuffer;
+#endif
             break;
         }
         case 2: // 32-bit
