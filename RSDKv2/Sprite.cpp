@@ -1,5 +1,10 @@
 #include "RetroEngine.hpp"
 
+#if RETRO_PLATFORM == RETRO_PS1
+#include "common/syscalls/syscalls.h"
+extern bool ps1SkipSprites; // set in main.cpp — skip GIF decode to speed tile-test boots
+#endif
+
 struct GifDecoder {
     int depth;
     int clearCode;
@@ -212,12 +217,37 @@ int AddGraphicsFile(const char *filePath) {
             return 0;
     }
     byte fileExtension = (byte)sheetPath[(StrLength(sheetPath) - 1) & 0xFF];
+#if RETRO_PLATFORM == RETRO_PS1
+    ramsyscall_printf("[sprite] '%s' id=%d gfxpos=%d\n", sheetPath, sheetID, GfxDataPosition);
+#endif
+#if RETRO_PLATFORM == RETRO_PS1
+    if (ps1SkipSprites) {
+        StrCopy(GfxSurface[sheetID].fileName, sheetPath);
+        GfxSurface[sheetID].width  = 0;
+        GfxSurface[sheetID].height = 0;
+        return sheetID;
+    }
+#endif
+#if RETRO_PLATFORM == RETRO_PS1
+    // Sprites are pre-converted to .gfx at build time (no LZW decode on PS1).
+    {
+        int sl = StrLength(sheetPath);
+        if (sl >= 4 && sheetPath[sl - 4] == '.' && sheetPath[sl - 3] == 'g' && sheetPath[sl - 2] == 'i' && sheetPath[sl - 1] == 'f') {
+            sheetPath[sl - 1] = 'x';
+            fileExtension      = 'x';
+        }
+    }
+#endif
     switch (fileExtension) {
         case 'f': LoadGIFFile(sheetPath, sheetID); break;
         case 'p': LoadBMPFile(sheetPath, sheetID); break;
         case 'v': LoadRSVFile(sheetPath, sheetID); break;
         case 'x': LoadGFXFile(sheetPath, sheetID); break;
     }
+#if RETRO_PLATFORM == RETRO_PS1
+    ramsyscall_printf("[sprite] done id=%d w=%d h=%d gfxpos=%d\n", sheetID, GfxSurface[sheetID].width,
+                      GfxSurface[sheetID].height, GfxDataPosition);
+#endif
 
     return sheetID;
 }
