@@ -1,4 +1,7 @@
 #include "RetroEngine.hpp"
+#if RETRO_PLATFORM == RETRO_PS1
+#include "common/syscalls/syscalls.h"
+#endif
 
 
 int SCREEN_XSIZE   = 320;
@@ -136,8 +139,41 @@ static void PS1DrawTileQuad(int screenX, int screenY, int tileIndex) {
 // Minimal flat tile renderer: draws the layer grid at scroll 0, no flip/deform/water.
 static void PS1DrawTileLayer(int layerID) {
     TileLayer *layer = &StageLayouts[activeTileLayers[layerID]];
+    static bool layerEnterLogged = false;
+    if (!layerEnterLogged) {
+        layerEnterLogged = true;
+        ramsyscall_printf("[layer] enter layerID=%d activeLayer=%d xsize=%d ysize=%d\n",
+            layerID, activeTileLayers[layerID], layer->xsize, layer->ysize);
+    }
     if (!layer->xsize || !layer->ysize)
         return;
+    static bool layerLogged = false;
+    if (!layerLogged) {
+        layerLogged = true;
+        int total  = layer->xsize * layer->ysize * 64;
+        int nonzero = 0;
+        for (int i = 0; i < total; ++i)
+            if (StageTiles.tileIndex[i] != 0)
+                ++nonzero;
+        ramsyscall_printf("[layer] layerID=%d xsize=%d ysize=%d tiles=%d nonzero=%d\n",
+            layerID, layer->xsize, layer->ysize, total, nonzero);
+        int firstNZ = 0;
+        for (int i = 0; i < total; ++i) {
+            if (StageTiles.tileIndex[i] != 0) { firstNZ = StageTiles.tileIndex[i]; break; }
+        }
+        if (firstNZ > 0)
+            ramsyscall_printf("[layer] firstNZ tile=%d gfx=%d,%d,%d,%d,%d,%d,%d,%d\n",
+                firstNZ, TileGfx[firstNZ * 256], TileGfx[firstNZ * 256 + 1],
+                TileGfx[firstNZ * 256 + 2], TileGfx[firstNZ * 256 + 3],
+                TileGfx[firstNZ * 256 + 4], TileGfx[firstNZ * 256 + 5],
+                TileGfx[firstNZ * 256 + 6], TileGfx[firstNZ * 256 + 7]);
+        else
+            ramsyscall_printf("[layer] no nonzero tiles\n");
+        ramsyscall_printf("[layer] tileIndex[0..15]:");
+        for (int i = 0; i < 16; ++i)
+            ramsyscall_printf(" %d", StageTiles.tileIndex[i]);
+        ramsyscall_printf("\n");
+    }
     int xsize = layer->xsize; // in 128x128 chunks
     int ysize = layer->ysize;
     for (int cy = 0; cy < ysize; ++cy) {
@@ -574,6 +610,19 @@ void DrawObjectList(int Layer) {
 }
 void DrawStageGfx() {
 #if RETRO_PLATFORM == RETRO_PS1
+    static bool drawLogged = false;
+    if (!drawLogged) {
+        drawLogged = true;
+        ramsyscall_printf("[draw] DrawStageGfx first call, activeTileLayers[0]=%d\n", activeTileLayers[0]);
+        ramsyscall_printf("[draw] tilegfx0=%d,%d,%d,%d pal0=%d,%d,%d pal1=%d,%d,%d\n",
+            TileGfx[0], TileGfx[1], TileGfx[2], TileGfx[3],
+            TilePalette[0].r, TilePalette[0].g, TilePalette[0].b,
+            TilePalette[1].r, TilePalette[1].g, TilePalette[1].b);
+        ramsyscall_printf("[draw] pal181=%d,%d,%d pal153=%d,%d,%d pal165=%d,%d,%d\n",
+            TilePalette[181].r, TilePalette[181].g, TilePalette[181].b,
+            TilePalette[153].r, TilePalette[153].g, TilePalette[153].b,
+            TilePalette[165].r, TilePalette[165].g, TilePalette[165].b);
+    }
     if (g_ps1GPU) {
         g_ps1GPU->clear();
         PS1UploadPalette();

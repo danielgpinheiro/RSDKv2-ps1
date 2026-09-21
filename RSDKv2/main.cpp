@@ -6,8 +6,12 @@
 #include <psyqo/cdrom-device.hh>
 #include "common/syscalls/syscalls.h"
 
+#define PS1_TILE_TEST 0 // TEMP: synthetic tile-path test (Phase 2 verification)
+#define PS1_SKIP_SPRITES 0 // TEMP: skip GIF sprite decode to speed tile-test boots
+
 psyqo::GPU         *g_ps1GPU   = nullptr;
 psyqo::CDRomDevice *g_ps1CDRom = nullptr;
+bool ps1SkipSprites = PS1_SKIP_SPRITES;
 
 void PS1PresentFramebuffer(ushort *fb) {
     if (!g_ps1GPU)
@@ -33,15 +37,45 @@ class RSDKv2PS1App final : public psyqo::Application {
 
         g_ps1GPU = &gpu();
 
+#if PS1_TILE_TEST
+        // Synthetic tile test: skip CD-ROM + Engine.Init — the test fills
+        // TileGfx/TilePalette itself. Temporary for Phase 2 verification.
+        return;
+#endif
+
         m_cdrom.prepare();
         m_cdrom.resetBlocking(gpu());
         g_ps1CDRom = &m_cdrom;
+
+        // Force-load a real stage (skip the title screen) to test tile rendering
+        // without input. Temporary until PAD input (overall Phase 4) is wired.
+        // NOTE: use a manual copy, not strcpy — the PS1 libc strcpy may be a stub.
+        {
+            const char *scnFolder = "SSZ";
+            const char *scnID     = "1"; // stage-list id is the bare number; LoadActFile prepends "Act"
+            int b = 0;
+            while (scnFolder[b]) {
+                Engine.startSceneFolder[b] = scnFolder[b];
+                ++b;
+            }
+            Engine.startSceneFolder[b] = 0;
+            b = 0;
+            while (scnID[b]) {
+                Engine.startSceneID[b] = scnID[b];
+                ++b;
+            }
+            Engine.startSceneID[b] = 0;
+        }
 
         Engine.Init();
         syscall_puts("[RSDKv2-PS1] Engine.Init() returned\n");
     }
 
     void frame() override {
+#if PS1_TILE_TEST
+        PS1TileSelfTest();
+        return;
+#endif
         Engine.RunFrame();
     }
 };
