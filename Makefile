@@ -63,3 +63,6 @@ LDFLAGS   += -msoft-float
 # -nostdlib (from common.mk) drops libgcc, but -msoft-float emits calls to
 # libgcc's software FP routines (__mulsf3, __divsf3, ...). Re-link it.
 LDFLAGS   += -lgcc
+# Real retail PS1 = 2MB RAM. The 8MB debug override is removed; the link must fit
+# the 2MB `ram` region (EXE loads at 0x80010000, so ~1.94MB usable).
+LDFLAGS   += -Wl,--defsym,RAM_SIZE=2M

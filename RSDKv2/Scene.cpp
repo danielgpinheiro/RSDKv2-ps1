@@ -83,7 +83,11 @@ LineScroll VParallax;
 Tiles128x128 StageTiles;
 CollisionMasks TileCollisions[2];
 
+#if RETRO_PLATFORM == RETRO_PS1
+byte TileGfx[0x10000]; // 64KB page buffer (tiles streamed to VRAM; software renderer unused on PS1)
+#else
 byte TileGfx[TILESET_SIZE];
+#endif
 
 void ProcessStage(void) {
     switch (StageMode) {
@@ -528,7 +532,7 @@ void LoadStageBackground() {
 
             memset(StageLayouts[i].tiles, 0, TILELAYER_CHUNK_MAX * sizeof(ushort));
             byte *lineScrollPtr = StageLayouts[i].lineScroll;
-            memset(StageLayouts[i].lineScroll, 0, 0x7FFF);
+            memset(StageLayouts[i].lineScroll, 0, TILELAYER_SCROLL_MAX);
 
             // Read Line Scroll
             byte buf[3];
@@ -745,6 +749,20 @@ void LoadStageCollisions() {
 }
 void LoadStageGIFFile(int stageID) {
     FileInfo info;
+#if RETRO_PLATFORM == RETRO_PS1
+    if (LoadStageFile("16x16Tiles.raw", stageID, &info)) {
+        byte fileBuffer = 0;
+        FileRead(&fileBuffer, 1); FileRead(&fileBuffer, 1); // width u16 BE (discard)
+        FileRead(&fileBuffer, 1); FileRead(&fileBuffer, 1); // height u16 BE (discard)
+        byte clr[3];
+        for (int c = 0; c < 0x80; ++c) FileRead(clr, 3);
+        for (int c = 0x80; c < 0x100; ++c) {
+            FileRead(clr, 3);
+            SetPaletteEntry(c, clr[0], clr[1], clr[2]);
+        }
+        CloseFile();
+    }
+#else
     if (LoadStageFile("16x16Tiles.gif", stageID, &info)) {
         byte fileBuffer = 0;
         int fileBuffer2 = 0;
@@ -806,6 +824,7 @@ void LoadStageGIFFile(int stageID) {
 
         CloseFile();
     }
+#endif
 }
 void LoadStageGFXFile(int stageID) {
     FileInfo info;
@@ -845,7 +864,7 @@ void LoadStageGFXFile(int stageID) {
         }
 
         byte transparent = TileGfx[0];
-        for (int i = 0; i < TILESET_SIZE; ++i) {
+        for (int i = 0; i < (int)sizeof(TileGfx); ++i) {
             if (TileGfx[i] == transparent)
                 TileGfx[i] = 0;
         }

@@ -1,14 +1,18 @@
 #ifndef SCENE_H
 #define SCENE_H
 
+#if RETRO_PLATFORM == RETRO_PS1
+#define LAYER_COUNT    (4)
+#else
 #define LAYER_COUNT    (9)
+#endif
 #define DEFORM_STORE   (0x100)
 #define DEFORM_SIZE    (320)
 #define DEFORM_COUNT   (DEFORM_STORE + DEFORM_SIZE)
 #define PARALLAX_COUNT (0x100)
 
 #if RETRO_PLATFORM == RETRO_PS1
-#define TILE_COUNT    (0x200)
+#define TILE_COUNT    (0x400)
 #else
 #define TILE_COUNT    (0x400)
 #endif
@@ -18,8 +22,8 @@
 #define TILESET_SIZE  (TILE_COUNT * TILE_DATASIZE)
 
 #if RETRO_PLATFORM == RETRO_PS1
-#define TILELAYER_CHUNK_W  (0x40)
-#define TILELAYER_CHUNK_H  (0x40)
+#define TILELAYER_CHUNK_W  (0x100)
+#define TILELAYER_CHUNK_H  (0x10)
 #else
 #define TILELAYER_CHUNK_W  (0x100)
 #define TILELAYER_CHUNK_H  (0x100)
@@ -28,7 +32,7 @@
 #define TILELAYER_SCROLL_MAX (TILELAYER_CHUNK_H * CHUNK_SIZE)
 
 #if RETRO_PLATFORM == RETRO_PS1
-#define CHUNKTILE_COUNT (0x80 * (8 * 8))
+#define CHUNKTILE_COUNT (0x200 * (8 * 8))
 #else
 #define CHUNKTILE_COUNT (0x200 * (8 * 8))
 #endif
@@ -83,8 +87,8 @@ enum CameraStyles {
 
 struct SceneInfo {
     char name[0x40];
-    char folder[0x40];
-    char id[0x40];
+    char folder[0x10];
+    char id[0x10];
     bool highlighted;
 };
 
@@ -205,7 +209,11 @@ extern LineScroll VParallax;
 extern Tiles128x128 StageTiles;
 extern CollisionMasks TileCollisions[2];
 
+#if RETRO_PLATFORM == RETRO_PS1
+extern byte TileGfx[0x10000]; // 64KB page buffer (tiles streamed to VRAM)
+#else
 extern byte TileGfx[TILESET_SIZE];
+#endif
 
 void ProcessStage();
 

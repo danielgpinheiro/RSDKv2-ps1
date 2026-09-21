@@ -30,7 +30,7 @@ byte GraphicData[GFXDATA_MAX];
 //  - framebuffer 320x240 at Y=0 (buf0) and Y=256 (buf1), X=0-319 halfwords (psyqo default)
 //  - CLUT (256x1, 15-bit) at (X=0, Y=240) -- the 16-line gap below buf0
 //  - sprite pages at pageX=5,7 (X base 320,448) x pageY=0,1 (Y 0,256)
-//  - tile pages at pageX=9,11 (X base 576,704) x pageY=0 (Y 0) -- 2 pages = 512 tiles
+//  - tile pages at pageX=9,11 (X base 576,704) x pageY=0,1 (Y 0,256) -- 4 pages = 1024 tiles
 //    Page X base = pageX*64 halfwords (NOT pixels); a page is 128 halfwords = 256 texels.
 //    Must start at >=320 halfwords to clear the framebuffer (X=0-319).
 #define PS1_CLUT_X 0
@@ -84,29 +84,36 @@ void PS1ResetSpriteVRAM() {
 void PS1UploadTileSet() {
     if (ps1TileSetUploaded)
         return;
+    FileInfo info;
+    if (!LoadStageFile("16x16Tiles.raw", StageListPosition, &info))
+        return;
+    SetFilePosition(4 + 768); // skip width/height + palette -> raw strip
     const int tilesPerPage = 256;
-    int pageCount          = (TILE_COUNT + tilesPerPage - 1) / tilesPerPage; // 2
-    static uint16_t row[128];                                                // 256 texels = 128 halfwords
+    int pageCount          = TILE_COUNT / tilesPerPage; // 4 (1024 tiles)
+    static uint16_t row[128];                            // 256 texels = 128 halfwords
     for (int page = 0; page < pageCount; ++page) {
-        int px        = PS1_TILE_PAGE_X + 2 * page; // pageX 9, 11
+        FileRead(TileGfx, tilesPerPage * 256); // 256 tiles = 64KB into the page buffer
+        int px        = PS1_TILE_PAGE_X + 2 * (page & 1); // 9, 11, 9, 11
+        int py        = PS1_TILE_PAGE_Y + (page >> 1);    // 0, 0, 1, 1
         int vramHalfX = px * 64;
-        int vramY     = PS1_TILE_PAGE_Y * 256;
+        int vramY     = py * 256;
         for (int ty = 0; ty < 256; ++ty) {
             int gridRow = ty >> 4;
             int y       = ty & 0xF;
             for (int halfX = 0; halfX < 128; ++halfX) {
                 int tx0  = halfX << 1;
                 int col0 = tx0 >> 4, x0 = tx0 & 0xF;
-                int n0   = page * tilesPerPage + (gridRow << 4) + col0;
+                int n0   = (gridRow << 4) + col0;
                 int col1 = (tx0 + 1) >> 4, x1 = (tx0 + 1) & 0xF;
-                int n1   = page * tilesPerPage + (gridRow << 4) + col1;
-                byte lo  = (n0 < TILE_COUNT) ? TileGfx[n0 * 256 + y * 16 + x0] : 0;
-                byte hi  = (n1 < TILE_COUNT) ? TileGfx[n1 * 256 + y * 16 + x1] : 0;
+                int n1   = (gridRow << 4) + col1;
+                byte lo  = TileGfx[n0 * 256 + y * 16 + x0];
+                byte hi  = TileGfx[n1 * 256 + y * 16 + x1];
                 row[halfX] = (uint16_t)(lo | (hi << 8));
             }
             g_ps1GPU->uploadToVRAM(row, psyqo::Rect{{vramHalfX, vramY + ty}, {128, 1}});
         }
     }
+    CloseFile();
     ps1TileSetUploaded = true;
 }
 
@@ -114,19 +121,21 @@ void PS1UploadTileSet() {
 static void PS1DrawTileQuad(int screenX, int screenY, int tileIndex) {
     if (tileIndex <= 0)           // tile 0 = transparent/empty
         return;
-    int page  = tileIndex >> 8;   // 0 or 1 (512 tiles / 256 per page)
+    int page  = tileIndex >> 8;   // 0..3 (1024 tiles / 256 per page)
     int pt    = tileIndex & 0xFF; // 0..255 within the page
     int u     = (pt & 0xF) << 4;  // 16 * (pt % 16)
     int v     = (pt >> 4) << 4;   // 16 * (pt / 16)
-    int pageX = PS1_TILE_PAGE_X + (page << 1); // 9 or 11
+    int pageX = PS1_TILE_PAGE_X + 2 * (page & 1); // 9, 11, 9, 11
+    int pageY = PS1_TILE_PAGE_Y + (page >> 1);    // 0, 0, 1, 1
 
-    if (pageX != ps1TileCurPage) {
+    int pageKey = (pageY << 4) | pageX;
+    if (pageKey != ps1TileCurPage) {
         psyqo::Prim::TPage tp;
         tp.attr.set(psyqo::Prim::TPageAttr::ColorMode::Tex8Bits);
         tp.attr.setPageX((uint8_t)pageX);
-        tp.attr.setPageY((uint8_t)PS1_TILE_PAGE_Y);
+        tp.attr.setPageY((uint8_t)pageY);
         g_ps1GPU->sendPrimitive(tp);
-        ps1TileCurPage = pageX;
+        ps1TileCurPage = pageKey;
     }
 
     psyqo::Prim::Sprite16x16 s(psyqo::Color{{.r = 0x80, .g = 0x80, .b = 0x80}});
@@ -173,6 +182,12 @@ static void PS1DrawTileLayer(int layerID) {
         for (int i = 0; i < 16; ++i)
             ramsyscall_printf(" %d", StageTiles.tileIndex[i]);
         ramsyscall_printf("\n");
+        ramsyscall_printf("[layer] tiles[0..3]=%d,%d,%d,%d\n",
+            layer->tiles[0], layer->tiles[1], layer->tiles[2], layer->tiles[3]);
+        ramsyscall_printf("[layer] atl=%d,%d,%d,%d tiles[71]=%d tiles[1447]=%d\n",
+            activeTileLayers[0], activeTileLayers[1], activeTileLayers[2], activeTileLayers[3],
+            layer->tiles[71], layer->tiles[1447]);
+        ramsyscall_printf("[layer] XScroll=%d YScroll=%d\n", XScrollOffset, YScrollOffset);
     }
     int xsize = layer->xsize; // in 128x128 chunks
     int ysize = layer->ysize;
@@ -183,12 +198,24 @@ static void PS1DrawTileLayer(int layerID) {
                 for (int sx = 0; sx < 8; ++sx) {
                     int chunk = (chunkIndex << 6) + sx + (sy << 3);
                     int tile  = StageTiles.tileIndex[chunk];
+                    static bool ps1FirstNZ = false;
+                    if (!ps1FirstNZ && tile != 0) {
+                        ps1FirstNZ = true;
+                        ramsyscall_printf("[loop] first nonzero: cx=%d cy=%d sx=%d sy=%d chunkIdx=%d chunk=%d tile=%d\n",
+                            cx, cy, sx, sy, chunkIndex, chunk, tile);
+                    }
                     if (tile == 0)
                         continue;
-                    int screenX = (cx << 7) + (sx << 4);
-                    int screenY = (cy << 7) + (sy << 4);
+                    int screenX = (cx << 7) + (sx << 4) - XScrollOffset;
+                    int screenY = (cy << 7) + (sy << 4) - YScrollOffset;
                     if (screenX < -16 || screenX >= SCREEN_XSIZE || screenY < -16 || screenY >= SCREEN_YSIZE)
                         continue;
+                    static bool ps1FirstDrawn = false;
+                    if (!ps1FirstDrawn) {
+                        ps1FirstDrawn = true;
+                        ramsyscall_printf("[layer] first drawn: cx=%d cy=%d sx=%d sy=%d screen=(%d,%d) tile=%d chunkIdx=%d\n",
+                            cx, cy, sx, sy, screenX, screenY, tile, chunkIndex);
+                    }
                     PS1DrawTileQuad(screenX, screenY, tile);
                 }
             }
@@ -204,17 +231,17 @@ void PS1TileSelfTest() {
     g_ps1GPU->clear();
 
     if (!ps1TileTestInit) {
-        TilePalette[1].r = 255; TilePalette[1].g = 0; TilePalette[1].b = 0;   // red
-        TilePalette[2].r = 0;   TilePalette[2].g = 0; TilePalette[2].b = 255; // blue
+        TilePalette[181].r = 255; TilePalette[181].g = 0; TilePalette[181].b = 0;   // red
+        TilePalette[153].r = 0;   TilePalette[153].g = 0; TilePalette[153].b = 255; // blue
         for (int y = 0; y < 16; ++y)
             for (int x = 0; x < 16; ++x)
-                TileGfx[256 + y * 16 + x] = (byte)((((x >> 2) + (y >> 2)) & 1) ? 2 : 1);
+                TileGfx[188 * 256 + y * 16 + x] = (byte)((((x >> 2) + (y >> 2)) & 1) ? 153 : 181);
         PS1UploadTileSet();
         ps1TileTestInit = true;
     }
 
     PS1UploadPalette();
-    PS1DrawTileQuad(100, 100, 1);
+    PS1DrawTileQuad(100, 100, 188);
 }
 
 void PS1UploadSpriteSheet(int sheetID) {
