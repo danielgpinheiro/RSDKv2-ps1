@@ -1785,7 +1785,14 @@ void ProcessScript(int scriptCodePtr, int jumpTablePtr, byte scriptSub) {
             case FUNC_INC: ++ScriptEng.operands[0]; break;
             case FUNC_DEC: --ScriptEng.operands[0]; break;
             case FUNC_MUL: ScriptEng.operands[0] *= ScriptEng.operands[1]; break;
-            case FUNC_DIV: ScriptEng.operands[0] /= ScriptEng.operands[1]; break;
+            case FUNC_DIV:
+                // PS1 (R3000A, no FPU): integer division by zero hangs/corrupts.
+                // Guard it — the script divisor is 0 in the SSZ startup context.
+                if (ScriptEng.operands[1] != 0)
+                    ScriptEng.operands[0] /= ScriptEng.operands[1];
+                else
+                    ScriptEng.operands[0] = 0;
+                break;
             case FUNC_SHR: ScriptEng.operands[0] >>= ScriptEng.operands[1]; break;
             case FUNC_SHL: ScriptEng.operands[0] <<= ScriptEng.operands[1]; break;
             case FUNC_AND: ScriptEng.operands[0] &= ScriptEng.operands[1]; break;
@@ -1918,7 +1925,12 @@ void ProcessScript(int scriptCodePtr, int jumpTablePtr, byte scriptSub) {
                 opcodeSize = 0;
                 --JumpTableStackPos;
                 break;
-            case FUNC_RAND: ScriptEng.operands[0] = rand() % ScriptEng.operands[1]; break;
+            case FUNC_RAND:
+                if (ScriptEng.operands[1] != 0)
+                    ScriptEng.operands[0] = rand() % ScriptEng.operands[1];
+                else
+                    ScriptEng.operands[0] = 0;
+                break;
             case FUNC_SIN: {
                 ScriptEng.operands[0] = Sin512(ScriptEng.operands[1]);
                 break;
