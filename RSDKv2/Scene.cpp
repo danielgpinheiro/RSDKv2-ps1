@@ -1,5 +1,8 @@
 #include "RetroEngine.hpp"
 #include <stdlib.h>
+#if RETRO_PLATFORM == RETRO_PS1
+#include "common/syscalls/syscalls.h"
+#endif
 
 int stageListCount[STAGELIST_MAX];
 char stageListNames[STAGELIST_MAX][0x20] = {
@@ -226,6 +229,24 @@ void LoadStageFiles(void) {
         ClearScriptData();
         for (int i = SPRITESHEETS_MAX; i > 0; i--) RemoveGraphicsFile((char *)"", i - 1);
 
+#if RETRO_PLATFORM == RETRO_PS1
+        // Precompiled bytecode — skip ParseScriptFile at runtime (golden rule).
+        {
+            FileInfo pcinfo;
+            if (LoadFile("Data/Scripts/Precompiled.bin", &pcinfo)) {
+                int pcScriptDataPos = 0, pcJumpTableDataPos = 0;
+                FileRead(&pcScriptDataPos, 4);
+                FileRead(&pcJumpTableDataPos, 4);
+                FileRead(ScriptData, pcScriptDataPos * 4);
+                FileRead(JumpTableData, pcJumpTableDataPos * 4);
+                FileRead(ObjectScriptList, OBJECT_COUNT * sizeof(ObjectScript));
+                ScriptDataPos    = pcScriptDataPos;
+                JumpTableDataPos = pcJumpTableDataPos;
+                CloseFile();
+            }
+        }
+#endif
+
         bool loadGlobals = false;
         if (LoadStageFile("StageConfig.bin", StageListPosition, &info)) {
             FileRead(&loadGlobals, 1);
@@ -247,7 +268,9 @@ void LoadStageFiles(void) {
                 strBuffer[fileBuffer2] = 0;
                 GetFileInfo(&infoStore);
                 CloseFile();
+#if RETRO_PLATFORM != RETRO_PS1
                 ParseScriptFile(strBuffer, scriptID++);
+#endif
                 SetFileInfo(&infoStore);
             }
             CloseFile();
@@ -269,7 +292,9 @@ void LoadStageFiles(void) {
                 strBuffer[fileBuffer2] = 0;
                 GetFileInfo(&infoStore);
                 CloseFile();
+#if RETRO_PLATFORM != RETRO_PS1
                 ParseScriptFile(strBuffer, scriptID + i);
+#endif
                 SetFileInfo(&infoStore);
             }
 
@@ -288,8 +313,10 @@ void LoadStageFiles(void) {
         }
         FileInfo info;
         for (int p = 0; p < PLAYER_COUNT; ++p) {
+#if RETRO_PLATFORM != RETRO_PS1
             if (PlayerScriptList[p].scriptPath[0])
                 ParseScriptFile(PlayerScriptList[p].scriptPath, p);
+#endif
         }
 
         LoadStageGIFFile(StageListPosition);
@@ -324,6 +351,16 @@ int LoadActFile(const char *ext, int stageID, FileInfo *info) {
     StrAdd(dest, "/Act");
     StrAdd(dest, stageList[ActiveStageList][stageID].id);
     StrAdd(dest, ext);
+
+#if RETRO_PLATFORM == RETRO_PS1
+    static bool actLogged = false;
+    if (!actLogged) {
+        actLogged = true;
+        ramsyscall_printf("[act] LoadActFile path='%s' ASL=%d stageID=%d folder='%s' id='%s'\n",
+            dest, ActiveStageList, stageID, stageList[ActiveStageList][stageID].folder,
+            stageList[ActiveStageList][stageID].id);
+    }
+#endif
 
     ConvertStringToInteger(stageList[ActiveStageList][stageID].id, &ActNumber);
 
