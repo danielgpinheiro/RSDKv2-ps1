@@ -24,6 +24,7 @@ byte GraphicData[GFXDATA_MAX];
 #include <psyqo/gpu.hh>
 #include <psyqo/primitives/common.hh>
 #include <psyqo/primitives/control.hh>
+#include <psyqo/primitives/quads.hh>
 #include <psyqo/primitives/sprites.hh>
 
 // VRAM layout (1MB, 1024x512 16-bit halfwords):
@@ -2057,6 +2058,12 @@ void DrawSprite(int XPos, int YPos, int width, int height, int sprX, int sprY, i
         GFXSurface *surface = &GfxSurface[sheetID];
         if (surface->vramPageX < 0 && surface->width > 0 && surface->height > 0)
             PS1UploadSpriteSheet(sheetID);
+        static bool sprLogged = false;
+        if (!sprLogged) {
+            sprLogged = true;
+            ramsyscall_printf("[sprite] DrawSprite XPos=%d YPos=%d w=%d h=%d sheet=%d sprX=%d sprY=%d\n", XPos, YPos, width, height, sheetID, sprX, sprY);
+            ramsyscall_printf("[sprite] sheet w=%d h=%d dataPos=%d vramPageX=%d vramPageY=%d\n", surface->width, surface->height, surface->dataPosition, surface->vramPageX, surface->vramPageY);
+        }
         if (surface->vramPageX >= 0) {
             int basePageX = surface->vramPageX;
             int basePageY = surface->vramPageY;
@@ -2280,6 +2287,15 @@ void DrawScaledSprite(int direction, int XPos, int YPos, int pivotX, int pivotY,
 
 void DrawRotatedSprite(int direction, int XPos, int YPos, int pivotX, int pivotY, int sprX, int sprY, int width, int height, int rotation,
                        int sheetID) {
+#if RETRO_PLATFORM == RETRO_PS1
+    if (g_ps1GPU && rotation == 0 && direction == FLIP_NONE) {
+        // rotation 0 + no flip == a plain sprite; the PS1 path draws textured quads
+        // directly (DrawSprite), while the software blit below targets FrameBuffer
+        // which the PS1 renderer never displays.
+        DrawSprite(XPos - pivotX, YPos - pivotY, width, height, sprX, sprY, sheetID);
+        return;
+    }
+#endif
     int sprXPos    = (pivotX + sprX) << 9;
     int sprYPos    = (pivotY + sprY) << 9;
     int fullwidth  = width + sprX;
@@ -2354,6 +2370,49 @@ void DrawRotatedSprite(int direction, int XPos, int YPos, int pivotX, int pivotY
 
     if (maxX <= 0 || maxY <= 0)
         return;
+
+#if RETRO_PLATFORM == RETRO_PS1
+    if (g_ps1GPU) {
+        GFXSurface *surf = &GfxSurface[sheetID];
+        if (surf->vramPageX < 0 && surf->width > 0 && surf->height > 0)
+            PS1UploadSpriteSheet(sheetID);
+        // Single-page only (sprite fits one 256x256 texture page). Wider sheets
+        // would need page-splitting across the rotation; fall back to the (invisible)
+        // software blit for those.
+        if (surf->vramPageX >= 0 && sprX + width <= 256 && sprY + height <= 256) {
+            static bool rotLogged = false;
+            if (!rotLogged) {
+                rotLogged = true;
+                ramsyscall_printf("[rot] TexturedQuad direction=%d rotation=%d w=%d h=%d\n", direction, rotation, width, height);
+            }
+            // RSDKv2 corner order: FLIP_NONE -> [0]=TL [1]=TR [2]=BL [3]=BR.
+            // FLIP_X mirrors X, so [1]=TL [0]=TR [3]=BL [2]=BR.
+            int a = 0, b = 1, c = 2, d = 3;
+            int uLeft, uRight;
+            if (direction == FLIP_X) {
+                a = 1; b = 0; c = 3; d = 2;
+                uLeft = sprX + width; uRight = sprX;
+            } else {
+                uLeft = sprX; uRight = sprX + width;
+            }
+            psyqo::Prim::TexturedQuad quad(psyqo::Color{{.r = 0x80, .g = 0x80, .b = 0x80}});
+            quad.pointA    = psyqo::Vertex{{.x = (int16_t)XPositions[a], .y = (int16_t)YPositions[a]}};
+            quad.uvA       = psyqo::PrimPieces::UVCoords{(uint8_t)uLeft, (uint8_t)sprY};
+            quad.clutIndex = psyqo::PrimPieces::ClutIndex(psyqo::Vertex{{.x = PS1_CLUT_X, .y = PS1_CLUT_Y}});
+            quad.pointB    = psyqo::Vertex{{.x = (int16_t)XPositions[b], .y = (int16_t)YPositions[b]}};
+            quad.uvB       = psyqo::PrimPieces::UVCoords{(uint8_t)uRight, (uint8_t)sprY};
+            quad.tpage.setPageX((uint8_t)surf->vramPageX);
+            quad.tpage.setPageY((uint8_t)surf->vramPageY);
+            quad.tpage.set(psyqo::Prim::TPageAttr::ColorMode::Tex8Bits);
+            quad.pointC = psyqo::Vertex{{.x = (int16_t)XPositions[c], .y = (int16_t)YPositions[c]}};
+            quad.uvC    = psyqo::PrimPieces::UVCoordsPadded{(uint8_t)uLeft, (uint8_t)(sprY + height), 0};
+            quad.pointD = psyqo::Vertex{{.x = (int16_t)XPositions[d], .y = (int16_t)YPositions[d]}};
+            quad.uvD    = psyqo::PrimPieces::UVCoordsPadded{(uint8_t)uRight, (uint8_t)(sprY + height), 0};
+            g_ps1GPU->sendPrimitive(quad);
+            return;
+        }
+    }
+#endif
 
     GFXSurface *surface  = &GfxSurface[sheetID];
     int pitch            = SCREEN_XSIZE - maxX;
