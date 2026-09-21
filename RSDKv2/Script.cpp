@@ -1335,7 +1335,13 @@ void ProcessScript(int scriptCodePtr, int jumpTablePtr, byte scriptSub) {
     int scriptDataPtr = scriptCodePtr;
     JumpTableStackPos = 0;
     while (running) {
-        int opcode           = ScriptData[scriptDataPtr++];
+        int opcode = ScriptData[scriptDataPtr++];
+        if (opcode < 0 || opcode >= (int)(sizeof(functions) / sizeof(functions[0]))) {
+            // Corrupt opcode (scriptDataPtr drifted out of the bytecode) — stop the
+            // script rather than reading functions[opcode] out of bounds.
+            running = false;
+            break;
+        }
         int opcodeSize       = functions[opcode].opcodeSize;
         int scriptCodeOffset = scriptDataPtr;
 
