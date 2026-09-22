@@ -68,3 +68,9 @@ LDFLAGS   += -lgcc
 # Real retail PS1 = 2MB RAM. The 8MB debug override is removed; the link must fit
 # the 2MB `ram` region (EXE loads at 0x80010000, so ~1.94MB usable).
 LDFLAGS   += -Wl,--defsym,RAM_SIZE=2M
+
+# Cancel make's built-in `%: %.o` link rule. Without this, the extensionless libc shim
+# headers (ps1/libc/string, vector, ...) listed in .dep files are treated as targets and
+# `string` gets rebuilt from `string.o`, overwriting the header. (Previously worked around
+# with a local -MP edit to nugget/common.mk.)
+%: %.o
