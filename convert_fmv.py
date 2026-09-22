@@ -194,8 +194,8 @@ def encode_macroblock(buffer, block, y_scale, c_scale):
 # ---------------------------------------------------------------------------
 def rgb_to_ycbcr(rgb):
     # BT.601 (matches PIL "YCbCr" used by encode_image.py).
-    rgb = rgb.astype(np.float32)
-    r, g, b = rgb[:, :, 0], rgb[:, :, 1], rgb[:, :, 2]
+    scaled = rgb.astype(np.float32) / 255.0
+    r, g, b = scaled[:, :, 0], scaled[:, :, 1], scaled[:, :, 2]
     y = 16 + r * 65.481 + g * 128.553 + b * 24.966
     cb = 128 - r * 37.797 - g * 74.203 + b * 112.0
     cr = 128 + r * 112.0 - g * 93.786 - b * 18.214
