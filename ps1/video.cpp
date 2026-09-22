@@ -54,16 +54,24 @@ bool PS1VideoInit() {
     return true;
 }
 
+static void onRead(bool ok) {
+    s_readOk   = ok;
+    s_readDone = true;
+}
+
 static void queueRead() {
     uint32_t lba = s_str->lba + (uint32_t)s_frameIndex * STR_SECTORS_PER_FRAME;
     s_readDone = false;
     // Asynchronous: the callback fires from the main loop (pumpCallbacks) when the
     // CD-ROM DMA finishes, so the read of frame N+1 overlaps the display of frame N.
-    g_ps1CDRom->readSectors(lba, STR_SECTORS_PER_FRAME, s_frame[s_readIdx],
-                            [](bool ok) {
-                                s_readOk   = ok;
-                                s_readDone = true;
-                            });
+    if (s_frameIndex == 0) {
+        // First frame: seek to the file's start sector.
+        g_ps1CDRom->readSectors(lba, STR_SECTORS_PER_FRAME, s_frame[s_readIdx], onRead);
+    } else {
+        // Sequential: the drive is already positioned right after the previous
+        // frame's sectors — skip SETLOC to avoid the ~200ms seek.
+        g_ps1CDRom->readSectorsSequential(STR_SECTORS_PER_FRAME, s_frame[s_readIdx], onRead);
+    }
 }
 
 bool PS1VideoOpen(const char *path) {
