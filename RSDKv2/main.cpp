@@ -31,20 +31,17 @@ static void PS1VideoSelfTestInit() {
 }
 
 static void PS1VideoSelfTest() {
-    static int tick = 0;
-
-    // 15 fps: advance one video frame every 4 ticks (60 Hz / 4 = 15).
-    if ((tick & 3) == 0) {
-        int r = PS1VideoNextFrame(); // 1 = decoded, 0 = still reading, -1 = EOF
-        if (r < 0) {
-            // EOF -> loop the video from the start.
-            PS1VideoClose();
-            if (!PS1VideoOpen("Data/Sprites/Videos/Intro.str"))
-                return;
-            PS1VideoNextFrame(); // re-queue the read of frame 0
-        }
+    // Advance the video as fast as the CD read allows — the read (~73ms/frame
+    // in the emulator) is the bottleneck, so poll every tick instead of gating
+    // at a fixed 15fps cadence.
+    int r = PS1VideoNextFrame(); // 1 = decoded, 0 = still reading, -1 = EOF
+    if (r < 0) {
+        // EOF -> loop the video from the start.
+        PS1VideoClose();
+        if (!PS1VideoOpen("Data/Sprites/Videos/Intro.str"))
+            return;
+        PS1VideoNextFrame(); // re-queue the read of frame 0
     }
-    tick++;
 
     // MDEC emits 16-pixel-wide vertical slices (column-major). Upload each
     // slice at its x offset instead of treating the buffer as row-major.
