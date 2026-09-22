@@ -7,7 +7,9 @@
 int SCREEN_XSIZE   = 320;
 int SCREEN_CENTERX = (SCREEN_XSIZE / 2);
 
-byte BlendLookupTable[0x100 * 0x100];
+#if RETRO_PLATFORM != RETRO_PS1
+byte BlendLookupTable[0x100 * 0x100]; // PS1: blending is done by GPU semi-transparency, not a LUT
+#endif
 
 byte TintLookupTable1[0x100];
 byte TintLookupTable2[0x100];
@@ -26,6 +28,7 @@ byte GraphicData[GFXDATA_MAX];
 #include <psyqo/primitives/control.hh>
 #include <psyqo/primitives/quads.hh>
 #include <psyqo/primitives/sprites.hh>
+#include "../ps1/gpu_chain.hh"
 
 // VRAM layout (1MB, 1024x512 16-bit halfwords):
 //  - framebuffer 320x240 at Y=0 (buf0) and Y=256 (buf1), X=0-319 halfwords (psyqo default)
@@ -42,9 +45,6 @@ static const int ps1PageSlotY[4] = { 0, 0, 1, 1 };
 #define PS1_TILE_PAGE_X 9
 #define PS1_TILE_PAGE_Y 0
 static bool ps1TileSetUploaded = false;
-static int ps1TileCurPage = -1;
-static int ps1CurPageX = -1;
-static int ps1CurPageY = -1;
 
 static bool PS1AllocPages(int pagesX, int *outX, int *outY) {
     if (pagesX < 1 || pagesX > 2 || ps1PageSlotIdx + pagesX > 4)
@@ -69,50 +69,30 @@ void PS1UploadPalette() {
             c = 0x8000; // visible black -> non-transparent black for opaque commands
         clut[i] = c;
     }
-    g_ps1GPU->uploadToVRAM(clut, psyqo::Rect{{PS1_CLUT_X, PS1_CLUT_Y}, {256, 1}});
+    PS1ChainUploadCLUT(clut, PS1_CLUT_X, PS1_CLUT_Y); // chained VRAM upload + cache flush
 }
 
 void PS1ResetSpriteVRAM() {
     ps1PageSlotIdx = 0;
-    ps1CurPageX    = -1;
-    ps1CurPageY    = -1;
-    ps1TileCurPage = -1;
+    PS1ChainInvalidateTPage();
 }
 
-// Re-pack the 16-wide tile strip into 16x16 tile grids and upload as 8-bit pages.
-// TileGfx layout: tile N is a CONTIGUOUS 16x16 block at byte offset N*256
-// (gfxDataPos = tileIndex << 8), 16 bytes/row stride.
+// Upload the stage tile set: 16x16Tiles.vram holds 4 pages already packed in texture-page
+// layout at build time (convert_tiles.py), so each page is one 64 KB read + one DMA.
 void PS1UploadTileSet() {
     if (ps1TileSetUploaded)
         return;
     FileInfo info;
-    if (!LoadStageFile("16x16Tiles.raw", StageListPosition, &info))
+    if (!LoadStageFile("16x16Tiles.vram", StageListPosition, &info))
         return;
-    SetFilePosition(4 + 768); // skip width/height + palette -> raw strip
-    const int tilesPerPage = 256;
-    int pageCount          = TILE_COUNT / tilesPerPage; // 4 (1024 tiles)
-    static uint16_t row[128];                            // 256 texels = 128 halfwords
+    SetFilePosition(4 + 768); // skip width/height + palette
+    PS1GpuImmediate();        // immediate VRAM uploads: wait for the in-flight DMA chain
+    const int pageCount = TILE_COUNT / 256; // 4 (1024 tiles)
     for (int page = 0; page < pageCount; ++page) {
-        FileRead(TileGfx, tilesPerPage * 256); // 256 tiles = 64KB into the page buffer
-        int px        = PS1_TILE_PAGE_X + 2 * (page & 1); // 9, 11, 9, 11
-        int py        = PS1_TILE_PAGE_Y + (page >> 1);    // 0, 0, 1, 1
-        int vramHalfX = px * 64;
-        int vramY     = py * 256;
-        for (int ty = 0; ty < 256; ++ty) {
-            int gridRow = ty >> 4;
-            int y       = ty & 0xF;
-            for (int halfX = 0; halfX < 128; ++halfX) {
-                int tx0  = halfX << 1;
-                int col0 = tx0 >> 4, x0 = tx0 & 0xF;
-                int n0   = (gridRow << 4) + col0;
-                int col1 = (tx0 + 1) >> 4, x1 = (tx0 + 1) & 0xF;
-                int n1   = (gridRow << 4) + col1;
-                byte lo  = TileGfx[n0 * 256 + y * 16 + x0];
-                byte hi  = TileGfx[n1 * 256 + y * 16 + x1];
-                row[halfX] = (uint16_t)(lo | (hi << 8));
-            }
-            g_ps1GPU->uploadToVRAM(row, psyqo::Rect{{vramHalfX, vramY + ty}, {128, 1}});
-        }
+        FileRead(TileGfx, 0x10000);
+        int px = PS1_TILE_PAGE_X + 2 * (page & 1); // 9, 11, 9, 11
+        int py = PS1_TILE_PAGE_Y + (page >> 1);    // 0, 0, 1, 1
+        g_ps1GPU->uploadToVRAM((const uint16_t *)TileGfx, psyqo::Rect{{(int16_t)(px * 64), (int16_t)(py * 256)}, {128, 256}});
     }
     CloseFile();
     ps1TileSetUploaded = true;
@@ -129,94 +109,52 @@ static void PS1DrawTileQuad(int screenX, int screenY, int tileIndex) {
     int pageX = PS1_TILE_PAGE_X + 2 * (page & 1); // 9, 11, 9, 11
     int pageY = PS1_TILE_PAGE_Y + (page >> 1);    // 0, 0, 1, 1
 
-    int pageKey = (pageY << 4) | pageX;
-    if (pageKey != ps1TileCurPage) {
-        psyqo::Prim::TPage tp;
-        tp.attr.set(psyqo::Prim::TPageAttr::ColorMode::Tex8Bits);
-        tp.attr.setPageX((uint8_t)pageX);
-        tp.attr.setPageY((uint8_t)pageY);
-        g_ps1GPU->sendPrimitive(tp);
-        ps1TileCurPage = pageKey;
-    }
+    psyqo::PrimPieces::TPageAttr attr;
+    attr.set(psyqo::Prim::TPageAttr::ColorMode::Tex8Bits);
+    attr.setPageX((uint8_t)pageX);
+    attr.setPageY((uint8_t)pageY);
+    PS1ChainTPage(attr);
 
     psyqo::Prim::Sprite16x16 s(psyqo::Color{{.r = 0x80, .g = 0x80, .b = 0x80}});
     s.position = psyqo::Vertex{{.x = (int16_t)screenX, .y = (int16_t)screenY}};
     s.texInfo  = psyqo::PrimPieces::TexInfo{(uint8_t)u, (uint8_t)v,
                    psyqo::PrimPieces::ClutIndex(psyqo::Vertex{{.x = PS1_CLUT_X, .y = PS1_CLUT_Y}})};
-    g_ps1GPU->sendPrimitive(s);
+    PS1ChainSprite16(s);
 }
 
-// Minimal flat tile renderer: draws the layer grid at scroll 0, no flip/deform/water.
+// Minimal flat tile renderer: no flip/deform/water yet. Only the chunks that
+// intersect the 320x240 view are visited (a view touches at most 4x3 chunks).
 static void PS1DrawTileLayer(int layerID) {
     TileLayer *layer = &StageLayouts[activeTileLayers[layerID]];
-    static bool layerEnterLogged = false;
-    if (!layerEnterLogged) {
-        layerEnterLogged = true;
-        ramsyscall_printf("[layer] enter layerID=%d activeLayer=%d xsize=%d ysize=%d\n",
-            layerID, activeTileLayers[layerID], layer->xsize, layer->ysize);
-    }
     if (!layer->xsize || !layer->ysize)
         return;
-    static bool layerLogged = false;
-    if (!layerLogged) {
-        layerLogged = true;
-        int total  = layer->xsize * layer->ysize * 64;
-        int nonzero = 0;
-        for (int i = 0; i < total; ++i)
-            if (StageTiles.tileIndex[i] != 0)
-                ++nonzero;
-        ramsyscall_printf("[layer] layerID=%d xsize=%d ysize=%d tiles=%d nonzero=%d\n",
-            layerID, layer->xsize, layer->ysize, total, nonzero);
-        int firstNZ = 0;
-        for (int i = 0; i < total; ++i) {
-            if (StageTiles.tileIndex[i] != 0) { firstNZ = StageTiles.tileIndex[i]; break; }
-        }
-        if (firstNZ > 0)
-            ramsyscall_printf("[layer] firstNZ tile=%d gfx=%d,%d,%d,%d,%d,%d,%d,%d\n",
-                firstNZ, TileGfx[firstNZ * 256], TileGfx[firstNZ * 256 + 1],
-                TileGfx[firstNZ * 256 + 2], TileGfx[firstNZ * 256 + 3],
-                TileGfx[firstNZ * 256 + 4], TileGfx[firstNZ * 256 + 5],
-                TileGfx[firstNZ * 256 + 6], TileGfx[firstNZ * 256 + 7]);
-        else
-            ramsyscall_printf("[layer] no nonzero tiles\n");
-        ramsyscall_printf("[layer] tileIndex[0..15]:");
-        for (int i = 0; i < 16; ++i)
-            ramsyscall_printf(" %d", StageTiles.tileIndex[i]);
-        ramsyscall_printf("\n");
-        ramsyscall_printf("[layer] tiles[0..3]=%d,%d,%d,%d\n",
-            layer->tiles[0], layer->tiles[1], layer->tiles[2], layer->tiles[3]);
-        ramsyscall_printf("[layer] atl=%d,%d,%d,%d tiles[71]=%d tiles[1447]=%d\n",
-            activeTileLayers[0], activeTileLayers[1], activeTileLayers[2], activeTileLayers[3],
-            layer->tiles[71], layer->tiles[1447]);
-        ramsyscall_printf("[layer] XScroll=%d YScroll=%d\n", XScrollOffset, YScrollOffset);
-    }
-    int xsize = layer->xsize; // in 128x128 chunks
-    int ysize = layer->ysize;
-    for (int cy = 0; cy < ysize; ++cy) {
-        for (int cx = 0; cx < xsize; ++cx) {
+    // Visible chunk range (128x128-pixel chunks), clamped to the layer.
+    int cx0 = XScrollOffset >> 7;
+    int cy0 = YScrollOffset >> 7;
+    int cx1 = (XScrollOffset + SCREEN_XSIZE - 1) >> 7;
+    int cy1 = (YScrollOffset + SCREEN_YSIZE - 1) >> 7;
+    if (cx0 < 0)
+        cx0 = 0;
+    if (cy0 < 0)
+        cy0 = 0;
+    if (cx1 >= layer->xsize)
+        cx1 = layer->xsize - 1;
+    if (cy1 >= layer->ysize)
+        cy1 = layer->ysize - 1;
+    for (int cy = cy0; cy <= cy1; ++cy) {
+        for (int cx = cx0; cx <= cx1; ++cx) {
             int chunkIndex = layer->tiles[cy * TILELAYER_CHUNK_W + cx];
             for (int sy = 0; sy < 8; ++sy) {
+                int screenY = (cy << 7) + (sy << 4) - YScrollOffset;
+                if (screenY < -16 || screenY >= SCREEN_YSIZE)
+                    continue;
                 for (int sx = 0; sx < 8; ++sx) {
-                    int chunk = (chunkIndex << 6) + sx + (sy << 3);
-                    int tile  = StageTiles.tileIndex[chunk];
-                    static bool ps1FirstNZ = false;
-                    if (!ps1FirstNZ && tile != 0) {
-                        ps1FirstNZ = true;
-                        ramsyscall_printf("[loop] first nonzero: cx=%d cy=%d sx=%d sy=%d chunkIdx=%d chunk=%d tile=%d\n",
-                            cx, cy, sx, sy, chunkIndex, chunk, tile);
-                    }
+                    int tile = StageTiles.tileIndex[(chunkIndex << 6) + sx + (sy << 3)];
                     if (tile == 0)
                         continue;
                     int screenX = (cx << 7) + (sx << 4) - XScrollOffset;
-                    int screenY = (cy << 7) + (sy << 4) - YScrollOffset;
-                    if (screenX < -16 || screenX >= SCREEN_XSIZE || screenY < -16 || screenY >= SCREEN_YSIZE)
+                    if (screenX < -16 || screenX >= SCREEN_XSIZE)
                         continue;
-                    static bool ps1FirstDrawn = false;
-                    if (!ps1FirstDrawn) {
-                        ps1FirstDrawn = true;
-                        ramsyscall_printf("[layer] first drawn: cx=%d cy=%d sx=%d sy=%d screen=(%d,%d) tile=%d chunkIdx=%d\n",
-                            cx, cy, sx, sy, screenX, screenY, tile, chunkIndex);
-                    }
                     PS1DrawTileQuad(screenX, screenY, tile);
                 }
             }
@@ -229,7 +167,7 @@ static bool ps1TileTestInit = false;
 // Self-contained tile-path test: fill a synthetic tile, upload it, draw it every
 // frame. Bypasses Engine.Init() and the script VM entirely. Temporary for Phase 2.
 void PS1TileSelfTest() {
-    g_ps1GPU->clear();
+    PS1ChainClear();
 
     if (!ps1TileTestInit) {
         TilePalette[181].r = 255; TilePalette[181].g = 0; TilePalette[181].b = 0;   // red
@@ -263,7 +201,8 @@ void PS1UploadSpriteSheet(int sheetID) {
     int halfW      = (s->width + 1) / 2;
     int vramHalfX  = px * 64; // pageX * 64 halfwords
     int vramY      = py * 256;
-    static uint16_t row[256];
+    alignas(4) static uint16_t row[256];
+    PS1GpuImmediate(); // immediate VRAM uploads: wait for the in-flight DMA chain
     for (int y = 0; y < s->height; ++y) {
         for (int x = 0; x < halfW; ++x) {
             int i   = y * s->width + x * 2;
@@ -281,8 +220,11 @@ int InitRenderDevice() {
 
     sprintf(gameTitle, "%s%s", Engine.GameWindowText, Engine.UseBinFile ? "" : " (Using Data Folder)");
 
+#if RETRO_PLATFORM != RETRO_PS1
+    // PS1 draws with GPU primitives; the 8-bit CPU framebuffer is never used (saves 76.8 KB heap).
     Engine.FrameBuffer = new byte[SCREEN_XSIZE * SCREEN_YSIZE];
     memset(Engine.FrameBuffer, 0, (SCREEN_XSIZE * SCREEN_YSIZE) * sizeof(byte));
+#endif
 
 #if RETRO_USING_SDL2
     SDL_Init(SDL_INIT_EVERYTHING);
@@ -413,6 +355,11 @@ int InitRenderDevice() {
 void FlipScreen() {
     if (Engine.GameMode == ENGINE_EXITGAME)
         return;
+#if RETRO_PLATFORM == RETRO_PS1
+    // The GPU renderer already drew the frame (DrawStageGfx); psyqo flips on vsync.
+    // The palette conversion below would be ~76,800 wasted RAM lookups per frame.
+    return;
+#endif
 
     // Clear the screen. This is needed to keep the
     // pillarboxes in fullscreen from displaying garbage data.
@@ -469,12 +416,7 @@ void FlipScreen() {
         }
         case 1: // 16-bit
         {
-#if RETRO_PLATFORM == RETRO_PS1
-            static ushort ps1FrameBuffer[320 * 240]; // SCREEN_XSIZE/YSIZE are runtime vars; screen is fixed 320x240
-            ushort *frameBuffer = ps1FrameBuffer;
-#else
             ushort *frameBuffer = new ushort[SCREEN_XSIZE * SCREEN_YSIZE];
-#endif
             memset(frameBuffer, 0, (SCREEN_XSIZE * SCREEN_YSIZE) * sizeof(ushort));
             if (PaletteMode) {
                 for (int y = 0; y < waterDrawPos; ++y) {
@@ -502,18 +444,13 @@ void FlipScreen() {
                 }
             }
 
-#if RETRO_PLATFORM == RETRO_PS1
-            // GPU path: DrawStageGfx renders directly into VRAM via sendPrimitive;
-            // the 8-bit CPU framebuffer is not uploaded (would overwrite the GPU output).
-#elif RETRO_USING_SDL2
+#if RETRO_USING_SDL2
             SDL_LockTexture(Engine.screenBuffer, NULL, &pixels, &pitch);
             memcpy(pixels, frameBuffer, pitch * SCREEN_YSIZE);
             SDL_UnlockTexture(Engine.screenBuffer);
 #endif
-#if !RETRO_PLATFORM
             if (frameBuffer)
                 delete[] frameBuffer;
-#endif
             break;
         }
         case 2: // 32-bit
@@ -601,6 +538,9 @@ void ReleaseRenderDevice() {
 
 void ClearScreen(byte index)
 {
+#if RETRO_PLATFORM == RETRO_PS1
+    return; // PS1: software rasteriser output is never displayed; GPU path TODO (phase 3c)
+#endif
     byte *pixelBuffer = Engine.FrameBuffer;
     int cnt           = SCREEN_XSIZE * SCREEN_YSIZE;
     while (cnt--) {
@@ -638,25 +578,11 @@ void DrawObjectList(int Layer) {
 }
 void DrawStageGfx() {
 #if RETRO_PLATFORM == RETRO_PS1
-    static bool drawLogged = false;
-    if (!drawLogged) {
-        drawLogged = true;
-        ramsyscall_printf("[draw] DrawStageGfx first call, activeTileLayers[0]=%d\n", activeTileLayers[0]);
-        ramsyscall_printf("[draw] tilegfx0=%d,%d,%d,%d pal0=%d,%d,%d pal1=%d,%d,%d\n",
-            TileGfx[0], TileGfx[1], TileGfx[2], TileGfx[3],
-            TilePalette[0].r, TilePalette[0].g, TilePalette[0].b,
-            TilePalette[1].r, TilePalette[1].g, TilePalette[1].b);
-        ramsyscall_printf("[draw] pal181=%d,%d,%d pal153=%d,%d,%d pal165=%d,%d,%d\n",
-            TilePalette[181].r, TilePalette[181].g, TilePalette[181].b,
-            TilePalette[153].r, TilePalette[153].g, TilePalette[153].b,
-            TilePalette[165].r, TilePalette[165].g, TilePalette[165].b);
-    }
     if (g_ps1GPU) {
-        g_ps1GPU->clear();
-        PS1UploadPalette();
-        PS1UploadTileSet();
-        ps1CurPageX = -1;
-        ps1CurPageY = -1;
+        PS1UploadTileSet();        // once per stage (immediate, waits for the in-flight chain)
+        PS1ChainClear();           // chained FastFill of the buffer this frame draws into
+        PS1UploadPalette();        // chained CLUT upload (fade / palette cycling)
+        PS1ChainInvalidateTPage();
     }
 #endif
     DrawObjectList(0);
@@ -721,6 +647,9 @@ void DrawStageGfx() {
 }
 
 void GenerateBlendTable(ushort alpha, byte type, byte a3, byte a4) {
+#if RETRO_PLATFORM == RETRO_PS1
+    return; // PS1: no blend LUT; GPU semi-transparency TODO (phase 3c)
+#else
     switch (type) {
         case 0:
             for (int y = 0; y < 256; ++y) {
@@ -757,6 +686,7 @@ void GenerateBlendTable(ushort alpha, byte type, byte a3, byte a4) {
             }
             break;
     }
+#endif
 }
 
 void GenerateTintTable(short alpha, short a2, byte type, byte a4, byte a5, byte tableID) {
@@ -796,6 +726,9 @@ void GenerateTintTable(short alpha, short a2, byte type, byte a4, byte a5, byte 
 }
 
 void DrawHLineScrollLayer(int layerID) {
+#if RETRO_PLATFORM == RETRO_PS1
+    return; // PS1: software rasteriser output is never displayed; GPU path TODO (phase 3c)
+#endif
     TileLayer *layer = &StageLayouts[activeTileLayers[layerID]];
     if (!layer->xsize || !layer->ysize)
         return;
@@ -1320,6 +1253,9 @@ void DrawHLineScrollLayer(int layerID) {
     }
 }
 void DrawVLineScrollLayer(int layerID) {
+#if RETRO_PLATFORM == RETRO_PS1
+    return; // PS1: software rasteriser output is never displayed; GPU path TODO (phase 3c)
+#endif
 
     TileLayer *layer = &StageLayouts[activeTileLayers[layerID]];
     if (!layer->xsize || !layer->ysize)
@@ -1894,6 +1830,9 @@ void DrawVLineScrollLayer(int layerID) {
 void Draw3DCloudLayer(int layerID) { TileLayer *layer = &StageLayouts[activeTileLayers[layerID]]; }
 
 void DrawTintRect(int XPos, int YPos, int width, int height, byte tintID) {
+#if RETRO_PLATFORM == RETRO_PS1
+    return; // PS1: software rasteriser output is never displayed; GPU path TODO (phase 3c)
+#endif
     if (width + XPos > SCREEN_XSIZE)
         width = SCREEN_XSIZE - XPos;
     if (XPos < 0) {
@@ -1933,6 +1872,9 @@ void DrawTintRect(int XPos, int YPos, int width, int height, byte tintID) {
 }
 void DrawScaledTintMask(int direction, int XPos, int YPos, int pivotX, int pivotY, int scaleX, int scaleY, int width, int height, int sprX, int sprY,
                         int tintID, int sheetID) {
+#if RETRO_PLATFORM == RETRO_PS1
+    return; // PS1: software rasteriser output is never displayed; GPU path TODO (phase 3c)
+#endif
     int roundedYPos = 0;
     int roundedXPos = 0;
     int truescaleX  = 4 * scaleX;
@@ -2058,12 +2000,6 @@ void DrawSprite(int XPos, int YPos, int width, int height, int sprX, int sprY, i
         GFXSurface *surface = &GfxSurface[sheetID];
         if (surface->vramPageX < 0 && surface->width > 0 && surface->height > 0)
             PS1UploadSpriteSheet(sheetID);
-        static bool sprLogged = false;
-        if (!sprLogged) {
-            sprLogged = true;
-            ramsyscall_printf("[sprite] DrawSprite XPos=%d YPos=%d w=%d h=%d sheet=%d sprX=%d sprY=%d\n", XPos, YPos, width, height, sheetID, sprX, sprY);
-            ramsyscall_printf("[sprite] sheet w=%d h=%d dataPos=%d vramPageX=%d vramPageY=%d\n", surface->width, surface->height, surface->dataPosition, surface->vramPageX, surface->vramPageY);
-        }
         if (surface->vramPageX >= 0) {
             int basePageX = surface->vramPageX;
             int basePageY = surface->vramPageY;
@@ -2077,22 +2013,20 @@ void DrawSprite(int XPos, int YPos, int width, int height, int sprX, int sprY, i
                     chunkW = maxW;
                 int pageX = basePageX + 2 * (x / 256);
                 int u     = x & 0xFF;
-                if (pageX != ps1CurPageX || basePageY != ps1CurPageY) {
-                    psyqo::Prim::TPage tp;
-                    tp.attr.set(psyqo::Prim::TPageAttr::ColorMode::Tex8Bits);
-                    tp.attr.setPageX((uint8_t)pageX);
-                    tp.attr.setPageY((uint8_t)basePageY);
-                    tp.attr.set(psyqo::Prim::TPageAttr::SemiTrans::HalfBackAndHalfFront);
-                    g_ps1GPU->sendPrimitive(tp);
-                    ps1CurPageX = pageX;
-                    ps1CurPageY = basePageY;
+                {
+                    psyqo::PrimPieces::TPageAttr attr;
+                    attr.set(psyqo::Prim::TPageAttr::ColorMode::Tex8Bits);
+                    attr.setPageX((uint8_t)pageX);
+                    attr.setPageY((uint8_t)basePageY);
+                    attr.set(psyqo::Prim::TPageAttr::SemiTrans::HalfBackAndHalfFront);
+                    PS1ChainTPage(attr);
                 }
                 psyqo::Prim::Sprite s(psyqo::Color{{.r = 0x80, .g = 0x80, .b = 0x80}});
                 s.position = psyqo::Vertex{{.x = (int16_t)drawX, .y = (int16_t)YPos}};
                 s.size     = psyqo::Vertex{{.w = (int16_t)chunkW, .h = (int16_t)height}};
                 s.texInfo  = psyqo::PrimPieces::TexInfo{(uint8_t)u, (uint8_t)sprY,
                                                         psyqo::PrimPieces::ClutIndex(psyqo::Vertex{{.x = PS1_CLUT_X, .y = PS1_CLUT_Y}})};
-                g_ps1GPU->sendPrimitive(s);
+                PS1ChainSprite(s);
                 x += chunkW;
                 drawX += chunkW;
                 remaining -= chunkW;
@@ -2102,6 +2036,9 @@ void DrawSprite(int XPos, int YPos, int width, int height, int sprX, int sprY, i
     }
 #endif
 
+#if RETRO_PLATFORM == RETRO_PS1
+    return; // PS1: software rasteriser output is never displayed; GPU path TODO (phase 3c)
+#endif
     GFXSurface *surface  = &GfxSurface[sheetID];
     int pitch            = SCREEN_XSIZE - width;
     int gfxPitch         = surface->width - width;
@@ -2121,6 +2058,9 @@ void DrawSprite(int XPos, int YPos, int width, int height, int sprX, int sprY, i
 }
 
 void DrawSpriteNoKey(int XPos, int YPos, int width, int height, int sprX, int sprY, int sheetID) {
+#if RETRO_PLATFORM == RETRO_PS1
+    return; // PS1: software rasteriser output is never displayed; GPU path TODO (phase 3c)
+#endif
     if (width + XPos > SCREEN_XSIZE)
         width = SCREEN_XSIZE - XPos;
     if (XPos < 0) {
@@ -2156,6 +2096,9 @@ void DrawSpriteNoKey(int XPos, int YPos, int width, int height, int sprX, int sp
 }
 
 void DrawSpriteClipped(int XPos, int YPos, int width, int height, int sprX, int sprY, int sheetID, int clipY) {
+#if RETRO_PLATFORM == RETRO_PS1
+    return; // PS1: software rasteriser output is never displayed; GPU path TODO (phase 3c)
+#endif
     if (width + XPos > SCREEN_XSIZE)
         width = SCREEN_XSIZE - XPos;
     if (XPos < 0) {
@@ -2193,6 +2136,9 @@ void DrawSpriteClipped(int XPos, int YPos, int width, int height, int sprX, int 
 
 void DrawScaledSprite(int direction, int XPos, int YPos, int pivotX, int pivotY, int scaleX, int scaleY, int width, int height, int sprX, int sprY,
                       int sheetID) {
+#if RETRO_PLATFORM == RETRO_PS1
+    return; // PS1: software rasteriser output is never displayed; GPU path TODO (phase 3c)
+#endif
     int roundedYPos = 0;
     int roundedXPos = 0;
     int truescaleX  = 4 * scaleX;
@@ -2380,11 +2326,6 @@ void DrawRotatedSprite(int direction, int XPos, int YPos, int pivotX, int pivotY
         // would need page-splitting across the rotation; fall back to the (invisible)
         // software blit for those.
         if (surf->vramPageX >= 0 && sprX + width <= 256 && sprY + height <= 256) {
-            static bool rotLogged = false;
-            if (!rotLogged) {
-                rotLogged = true;
-                ramsyscall_printf("[rot] TexturedQuad direction=%d rotation=%d w=%d h=%d\n", direction, rotation, width, height);
-            }
             // RSDKv2 corner order: FLIP_NONE -> [0]=TL [1]=TR [2]=BL [3]=BR.
             // FLIP_X mirrors X, so [1]=TL [0]=TR [3]=BL [2]=BR.
             int a = 0, b = 1, c = 2, d = 3;
@@ -2408,12 +2349,15 @@ void DrawRotatedSprite(int direction, int XPos, int YPos, int pivotX, int pivotY
             quad.uvC    = psyqo::PrimPieces::UVCoordsPadded{(uint8_t)uLeft, (uint8_t)(sprY + height), 0};
             quad.pointD = psyqo::Vertex{{.x = (int16_t)XPositions[d], .y = (int16_t)YPositions[d]}};
             quad.uvD    = psyqo::PrimPieces::UVCoordsPadded{(uint8_t)uRight, (uint8_t)(sprY + height), 0};
-            g_ps1GPU->sendPrimitive(quad);
+            PS1ChainQuad(quad);
             return;
         }
     }
 #endif
 
+#if RETRO_PLATFORM == RETRO_PS1
+    return; // PS1: software rasteriser output is never displayed; GPU path TODO (phase 3c)
+#endif
     GFXSurface *surface  = &GfxSurface[sheetID];
     int pitch            = SCREEN_XSIZE - maxX;
     byte *pixelBufferPtr = &Engine.FrameBuffer[left + SCREEN_XSIZE * top];
@@ -2473,6 +2417,9 @@ void DrawRotatedSprite(int direction, int XPos, int YPos, int pivotX, int pivotY
 }
 
 void DrawBlendedSprite(int XPos, int YPos, int width, int height, int sprX, int sprY, int sheetID) {
+#if RETRO_PLATFORM == RETRO_PS1
+    return; // PS1: no blend LUT; GPU semi-transparency TODO (phase 3c)
+#else
     if (width + XPos > SCREEN_XSIZE)
         width = SCREEN_XSIZE - XPos;
     if (XPos < 0) {
@@ -2506,6 +2453,7 @@ void DrawBlendedSprite(int XPos, int YPos, int width, int height, int sprX, int 
         pixelBufferPtr += pitch;
         gfxData += gfxPitch;
     }
+#endif
 }
 
 void DrawTextMenuEntry(void *menu, int rowID, int XPos, int YPos, int textHighlight) {

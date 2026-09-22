@@ -1,5 +1,16 @@
 #!/usr/bin/env python3
-"""Convert 16x16Tiles.gif -> 16x16Tiles.raw (palette + raw 8-bit strip) and repack Data.bin.
+"""Convert 16x16Tiles.gif -> 16x16Tiles.raw (palette + raw 8-bit strip) and
+16x16Tiles.vram (palette + tiles pre-packed in PS1 texture-page layout), and repack Data.bin.
+
+Usage:
+  python3 convert_tiles.py                 # Data.bin mode: add .raw + .vram into build/iso/Data.bin
+  python3 convert_tiles.py --loose DIR     # convert every DIR/**/16x16Tiles.raw -> 16x16Tiles.vram
+
+.vram format (loaded by PS1UploadTileSet / LoadStageGIFFile on PS1):
+  u16 BE width (256), u16 BE height (1024), 256*3 palette, then 4 texture pages of
+  256x256 8-bit texels (65536 bytes each, row-major). Page p holds tiles p*256..p*256+255
+  in a 16x16 grid: tile n (within the page) at texel (16*(n%16), 16*(n/16)). Each page is
+  uploaded with a single DMA to VRAM (128 halfwords x 256 lines) — no CPU re-pack at runtime.
 
 Raw format (matched by LoadStageGIFFile on PS1):
   u16 BE width, u16 BE height, 256*3 palette (GCT), then width*height raw pixels.
@@ -62,7 +73,45 @@ def gif_to_raw(raw):
     return bytes(out)
 
 
+TILES_PER_PAGE = 256
+PAGES = 4
+
+
+def raw_to_vram(raw):
+    """16x16Tiles.raw (header + 16x16384 strip) -> 16x16Tiles.vram (header + 4 pages)."""
+    hdr = raw[4:4 + 768]
+    strip = raw[4 + 768:]
+    assert len(strip) == 16 * 16 * TILES_PER_PAGE * PAGES, len(strip)
+    out = bytearray(struct.pack('>HH', 256, 256 * PAGES)) + hdr
+    for page in range(PAGES):
+        pg = bytearray(256 * 256)
+        for n in range(TILES_PER_PAGE):
+            tile = page * TILES_PER_PAGE + n
+            tx, ty = (n & 15) * 16, (n >> 4) * 16
+            src = tile * 256
+            for y in range(16):
+                row = (ty + y) * 256 + tx
+                pg[row:row + 16] = strip[src + y * 16:src + y * 16 + 16]
+        out += pg
+    return bytes(out)
+
+
+def loose(root):
+    n = 0
+    for dirpath, _, files in os.walk(root):
+        if '16x16Tiles.raw' in files:
+            raw = open(os.path.join(dirpath, '16x16Tiles.raw'), 'rb').read()
+            open(os.path.join(dirpath, '16x16Tiles.vram'), 'wb').write(raw_to_vram(raw))
+            n += 1
+            print('wrote', os.path.join(dirpath, '16x16Tiles.vram'))
+    print(f'{n} .vram files')
+
+
 def main():
+    import sys
+    if len(sys.argv) > 2 and sys.argv[1] == '--loose':
+        loose(sys.argv[2])
+        return
     data = open(SRC, 'rb').read()
     headerSize, dirs = parse(data)
     blks = blocks(data, headerSize, dirs)
@@ -74,6 +123,7 @@ def main():
             if fname == '16x16Tiles.gif':
                 raw = gif_to_raw(bytes(b ^ 0xFF for b in fdata))
                 newfiles.append(('16x16Tiles.raw', bytes(b ^ 0xFF for b in raw)))
+                newfiles.append(('16x16Tiles.vram', bytes(b ^ 0xFF for b in raw_to_vram(raw))))
                 added += 1
         files.extend(newfiles)
 
@@ -100,7 +150,7 @@ def main():
     os.replace(SRC, BAK)
     with open(DST, 'wb') as f:
         f.write(out)
-    print(f'wrote {DST} ({len(out)} bytes), added {added} 16x16Tiles.raw files, backed up to {BAK}')
+    print(f'wrote {DST} ({len(out)} bytes), added {added} 16x16Tiles.raw/.vram pairs, backed up to {BAK}')
 
 
 if __name__ == '__main__':

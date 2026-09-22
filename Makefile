@@ -45,6 +45,7 @@ ps1/libc/stdio.cpp \
 ps1/cdrom_fs.cpp \
 ps1/mdec.cpp \
 ps1/video.cpp \
+ps1/gpu_chain.cpp \
 ps1/cdrom_stream.cpp \
 
 # Engine include dir (belt-and-suspenders; quote-includes resolve relative to the .cpp anyway).

@@ -41,7 +41,9 @@ struct GFXSurface {
 extern int SCREEN_XSIZE;
 extern int SCREEN_CENTERX;
 
+#if RETRO_PLATFORM != RETRO_PS1
 extern byte BlendLookupTable[0x100 * 0x100];
+#endif
 
 extern byte TintLookupTable1[0x100];
 extern byte TintLookupTable2[0x100];
@@ -56,7 +58,6 @@ extern byte GraphicData[GFXDATA_MAX];
 
 int InitRenderDevice();
 void FlipScreen();
-void PS1PresentFramebuffer(ushort *fb);
 #if RETRO_PLATFORM == RETRO_PS1
 void PS1UploadPalette();
 void PS1UploadSpriteSheet(int sheetID);

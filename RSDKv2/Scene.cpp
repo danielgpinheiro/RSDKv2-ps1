@@ -84,7 +84,7 @@ Tiles128x128 StageTiles;
 CollisionMasks TileCollisions[2];
 
 #if RETRO_PLATFORM == RETRO_PS1
-byte TileGfx[0x10000]; // 64KB page buffer (tiles streamed to VRAM; software renderer unused on PS1)
+alignas(4) byte TileGfx[0x10000]; // 64KB page buffer (DMA source: must be word-aligned) (tiles streamed to VRAM; software renderer unused on PS1)
 #else
 byte TileGfx[TILESET_SIZE];
 #endif
@@ -750,7 +750,7 @@ void LoadStageCollisions() {
 void LoadStageGIFFile(int stageID) {
     FileInfo info;
 #if RETRO_PLATFORM == RETRO_PS1
-    if (LoadStageFile("16x16Tiles.raw", stageID, &info)) {
+    if (LoadStageFile("16x16Tiles.vram", stageID, &info)) { // same header as .raw: w, h, palette
         byte fileBuffer = 0;
         FileRead(&fileBuffer, 1); FileRead(&fileBuffer, 1); // width u16 BE (discard)
         FileRead(&fileBuffer, 1); FileRead(&fileBuffer, 1); // height u16 BE (discard)
