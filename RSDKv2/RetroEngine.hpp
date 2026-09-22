@@ -52,7 +52,11 @@ typedef unsigned int uint;
 #define RETRO_MOBILE   (1)
 
 // use this macro (RETRO_PLATFORM) to define platform specific code blocks and etc to run the engine
-#if defined _WIN32
+#if defined RETRO_PS1_HOST_TOOL
+// Host-side PS1 build tools (tools/rsdkscript): compile engine code for the Mac with the
+// PS1 configuration (same array sizes, SDL/mod loader off) so outputs match the console.
+#define RETRO_PLATFORM (RETRO_PS1)
+#elif defined _WIN32
 #if defined WINAPI_FAMILY
 #if WINAPI_FAMILY != WINAPI_FAMILY_APP
 #define RETRO_PLATFORM (RETRO_WIN)

@@ -76,3 +76,12 @@ LDFLAGS   += -Wl,--defsym,RAM_SIZE=2M
 # `string` gets rebuilt from `string.o`, overwriting the header. (Previously worked around
 # with a local -MP edit to nugget/common.mk.)
 %: %.o
+
+# Build-time RetroScript compiler (host tool) -> per-stage bytecode on the ISO tree.
+# Re-run whenever a .txt script, GameConfig/StageConfig or SCRIPTDATA/JUMPTABLE sizes change.
+bytecode:
+	$(MAKE) -C tools/rsdkscript
+	mkdir -p build/iso/Data/Scripts/Bytecode
+	tools/rsdkscript/rsdkscript build/iso build/iso/Data/Scripts/Bytecode
+
+.PHONY: bytecode

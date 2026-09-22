@@ -234,20 +234,38 @@ void LoadStageFiles(void) {
         for (int i = SPRITESHEETS_MAX; i > 0; i--) RemoveGraphicsFile((char *)"", i - 1);
 
 #if RETRO_PLATFORM == RETRO_PS1
-        // Precompiled bytecode — skip ParseScriptFile at runtime (golden rule).
+        // Precompiled bytecode (golden rule: no .txt parsing on the console). Produced at
+        // build time by tools/rsdkscript, one file per stage folder, "RSB2" format:
+        // header, ScriptData, JumpTableData, ObjectScriptList (PS1 layout), player scripts.
         {
+            char bcPath[0x40];
+            StrCopy(bcPath, "Data/Scripts/Bytecode/");
+            StrAdd(bcPath, stageList[ActiveStageList][StageListPosition].folder);
+            StrAdd(bcPath, ".bin");
             FileInfo pcinfo;
-            if (LoadFile("Data/Scripts/Precompiled.bin", &pcinfo)) {
-                int pcScriptDataPos = 0, pcJumpTableDataPos = 0;
-                FileRead(&pcScriptDataPos, 4);
-                FileRead(&pcJumpTableDataPos, 4);
-                FileRead(ScriptData, pcScriptDataPos * 4);
-                FileRead(JumpTableData, pcJumpTableDataPos * 4);
-                FileRead(ObjectScriptList, OBJECT_COUNT * sizeof(ObjectScript));
-                ScriptDataPos    = pcScriptDataPos;
-                JumpTableDataPos = pcJumpTableDataPos;
+            bool ok = false;
+            if (LoadFile(bcPath, &pcinfo)) {
+                uint32_t hdr[4] = { 0, 0, 0, 0 }; // magic, version, ScriptDataPos, JumpTableDataPos
+                FileRead(hdr, sizeof(hdr));
+                if (hdr[0] == 0x32425352 && hdr[1] == 1 && hdr[2] <= SCRIPTDATA_COUNT && hdr[3] <= JUMPTABLE_COUNT) {
+                    FileRead(ScriptData, hdr[2] * 4);
+                    FileRead(JumpTableData, hdr[3] * 4);
+                    static_assert(sizeof(ObjectScript) == 40, "RSB2 ObjectScript layout");
+                    FileRead(ObjectScriptList, OBJECT_COUNT * sizeof(ObjectScript));
+                    for (int p = 0; p < PLAYER_COUNT; ++p) {
+                        FileRead(&PlayerScriptList[p].scriptCodePtr_PlayerMain, 4);
+                        FileRead(&PlayerScriptList[p].jumpTablePtr_PlayerMain, 4);
+                        FileRead(PlayerScriptList[p].scriptCodePtr_PlayerState, 256 * 4);
+                        FileRead(PlayerScriptList[p].jumpTablePtr_PlayerState, 256 * 4);
+                    }
+                    ScriptDataPos    = hdr[2];
+                    JumpTableDataPos = hdr[3];
+                    ok               = true;
+                }
                 CloseFile();
             }
+            if (!ok)
+                ramsyscall_printf("[RSDKv2-PS1] ERROR: missing/invalid script bytecode %s\n", bcPath);
         }
 #endif
 
