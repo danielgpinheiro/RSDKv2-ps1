@@ -106,14 +106,15 @@ void PS1GpuImmediate() {
         s_gpu->waitChainIdle();
 }
 
-void PS1ChainClear(uint8_t r, uint8_t g, uint8_t b) {
+psyqo::Prim::FastFill *PS1ChainClear(uint8_t r, uint8_t g, uint8_t b) {
     flushBatch();
     auto *frag = allocRaw<psyqo::Fragments::SimpleFragment<psyqo::Prim::FastFill>>();
     if (!frag)
-        return;
+        return nullptr;
     new (frag) psyqo::Fragments::SimpleFragment<psyqo::Prim::FastFill>();
     s_gpu->getNextClear(frag->primitive, psyqo::Color{{.r = r, .g = g, .b = b}});
     s_gpu->chain(*frag);
+    return &frag->primitive;
 }
 
 void PS1ChainUploadRow(const uint16_t *data, int count, int16_t x, int16_t y) {
@@ -129,6 +130,25 @@ void PS1ChainUploadRow(const uint16_t *data, int count, int16_t x, int16_t y) {
         fr->words = (unsigned)(sizeof(psyqo::Prim::VRAMUpload) / 4 + n / 2); // n is even
         s_gpu->chain(*fr);
     }
+}
+
+int PS1ChainReserveRow(int count, int16_t x, int16_t y, uint16_t **chunkData, uint16_t *chunkLen, int maxChunks) {
+    flushBatch();
+    int chunks = 0;
+    for (int off = 0; off < count && chunks < maxChunks; off += PS1_CLUT_CHUNK) {
+        int n    = (count - off < PS1_CLUT_CHUNK) ? (count - off) : PS1_CLUT_CHUNK;
+        auto *fr = allocRaw<ClutChunkFragment>();
+        if (!fr)
+            return 0;
+        new (&fr->upload) psyqo::Prim::VRAMUpload();
+        fr->upload.region = psyqo::Rect{{(int16_t)(x + off), y}, {(int16_t)n, 1}};
+        fr->words         = (unsigned)(sizeof(psyqo::Prim::VRAMUpload) / 4 + n / 2); // n is even
+        s_gpu->chain(*fr);
+        chunkData[chunks] = fr->data;
+        chunkLen[chunks]  = (uint16_t)n;
+        ++chunks;
+    }
+    return chunks;
 }
 
 void PS1ChainFlushCache() {

@@ -44,10 +44,24 @@ byte GraphicData[GFXDATA_MAX];
 #define PS1_TILE_PAGE_Y 0
 static bool ps1TileSetUploaded = false;
 
-void PS1UploadPalette() {
-    static uint16_t clut[256];
-    // Honour the RSDKv2 palette fade: when PaletteMode is set, use the faded
-    // palette (TilePaletteF, updated by SetFade) instead of the normal one.
+// Palette and clear colour follow PC timing: PC applies the (faded) palette in FlipScreen,
+// after the frame is drawn, so a SetFade called from an ObjectDraw sub (e.g. the title
+// card's fade-in) shows in the same frame. Here the CLUT uploads and the clear are chained
+// first (they must precede the primitives), filled with the current palette, and rewritten
+// in PS1FinalizePalette() (FlipScreen) with the palette as it stands when drawing is done.
+// 4-bit atlas CLUTs map 16 values to master entries and follow every fade / rotation.
+static uint16_t s_pal[256 + PS1_ATLAS_MAX_CLUTS * 16]; // master CLUT, then the 4-bit CLUTs
+struct PS1PalChunk {
+    uint16_t *dst;
+    uint16_t src, n;
+};
+static PS1PalChunk s_palChunks[256];
+static int s_palChunkCount                  = 0;
+static psyqo::Prim::FastFill *s_clearPrim   = nullptr;
+static bool s_palReserved                   = false;
+
+static void PS1BuildPalette() {
+    // PaletteMode set: the faded palette (TilePaletteF, updated by SetFade).
     const Colour *pal = PaletteMode ? TilePaletteF : TilePalette;
     for (int i = 0; i < 256; ++i) {
         byte r = pal[i].r, g = pal[i].g, b = pal[i].b;
@@ -56,27 +70,66 @@ void PS1UploadPalette() {
             c = 0x0000; // index 0 = transparent (matches RSDKv2 sprite transparency)
         else if (c == 0x0000)
             c = 0x8000; // visible black -> non-transparent black for opaque commands
-        clut[i] = c;
+        s_pal[i] = c;
     }
-    PS1ChainUploadRow(clut, 256, PS1_CLUT_X, PS1_CLUT_Y); // chained VRAM upload
-
-    // 4-bit atlas CLUTs map 16 values to master entries: rebuilt from the (faded / rotated)
-    // master CLUT every frame, uploaded as runs of adjacent slots in the same VRAM row.
-    static uint16_t clut4[PS1_ATLAS_MAX_CLUTS * 16];
     for (int k = 0; k < g_ps1AtlasClutCount; ++k) {
         const uint8_t *map = g_ps1AtlasCluts[k].map;
-        clut4[k * 16] = 0x0000; // transparent
-        for (int i = 1; i < 16; ++i) clut4[k * 16 + i] = clut[map[i]];
+        uint16_t *dst      = &s_pal[256 + k * 16];
+        dst[0]             = 0x0000; // transparent
+        for (int i = 1; i < 16; ++i) dst[i] = s_pal[map[i]];
     }
-    for (int k = 0; k < g_ps1AtlasClutCount;) {
+}
+
+static psyqo::Color PS1ClearColour() {
+    // Under a fade the empty screen is the fade colour's share (PC: ClearScreen(0) + faded
+    // palette entry 0 = black).
+    if (!PaletteMode)
+        return psyqo::Color{{.r = 0, .g = 0, .b = 0}};
+    return psyqo::Color{{.r = (uint8_t)((ps1FadeR * ps1FadeA) >> 8), .g = (uint8_t)((ps1FadeG * ps1FadeA) >> 8),
+                         .b = (uint8_t)((ps1FadeB * ps1FadeA) >> 8)}};
+}
+
+static void PS1FillPaletteChunks() {
+    for (int i = 0; i < s_palChunkCount; ++i)
+        memcpy(s_palChunks[i].dst, &s_pal[s_palChunks[i].src], s_palChunks[i].n * sizeof(uint16_t));
+}
+
+static void PS1ReserveRow(int src, int count, int16_t x, int16_t y) {
+    uint16_t *data[32];
+    uint16_t len[32];
+    int n = PS1ChainReserveRow(count, x, y, data, len, 32);
+    for (int i = 0; i < n && s_palChunkCount < 256; ++i) {
+        s_palChunks[s_palChunkCount++] = PS1PalChunk{data[i], (uint16_t)src, len[i]};
+        src += len[i];
+    }
+}
+
+void PS1UploadPalette() {
+    PS1BuildPalette();
+    s_palChunkCount = 0;
+    PS1ReserveRow(0, 256, PS1_CLUT_X, PS1_CLUT_Y);
+    for (int k = 0; k < g_ps1AtlasClutCount;) { // runs of adjacent slots in one VRAM row
         int run = 1;
         while (k + run < g_ps1AtlasClutCount && g_ps1AtlasCluts[k + run].y == g_ps1AtlasCluts[k].y
                && g_ps1AtlasCluts[k + run].x == g_ps1AtlasCluts[k].x + 16 * run)
             ++run;
-        PS1ChainUploadRow(&clut4[k * 16], run * 16, (int16_t)g_ps1AtlasCluts[k].x, (int16_t)g_ps1AtlasCluts[k].y);
+        PS1ReserveRow(256 + k * 16, run * 16, (int16_t)g_ps1AtlasCluts[k].x, (int16_t)g_ps1AtlasCluts[k].y);
         k += run;
     }
+    PS1FillPaletteChunks();
     PS1ChainFlushCache(); // the GPU caches CLUTs
+    s_palReserved = true;
+}
+
+void PS1FinalizePalette() {
+    if (!s_palReserved)
+        return;
+    s_palReserved = false;
+    PS1BuildPalette();
+    PS1FillPaletteChunks();
+    if (s_clearPrim)
+        s_clearPrim->setColor(PS1ClearColour());
+    s_clearPrim = nullptr;
 }
 
 static void PS1ClearClusterCache();
@@ -465,8 +518,9 @@ void FlipScreen() {
     if (Engine.GameMode == ENGINE_EXITGAME)
         return;
 #if RETRO_PLATFORM == RETRO_PS1
-    // The GPU renderer already drew the frame (DrawStageGfx); psyqo flips on vsync.
-    // The palette conversion below would be ~76,800 wasted RAM lookups per frame.
+    // The GPU renderer already chained the frame (DrawStageGfx); psyqo flips on vsync. Like
+    // PC's palette conversion here, the palette is taken as it stands after drawing.
+    PS1FinalizePalette();
     return;
 #endif
 
@@ -689,13 +743,11 @@ void DrawStageGfx() {
 #if RETRO_PLATFORM == RETRO_PS1
     if (g_ps1GPU) {
         PS1UploadTileSet();        // once per stage (immediate, waits for the in-flight chain)
-        // Chained FastFill of the buffer this frame draws into. Under a fade the empty screen
-        // is the fade colour's share (PC: ClearScreen(0) + faded palette entry 0 = black).
-        if (PaletteMode)
-            PS1ChainClear((ps1FadeR * ps1FadeA) >> 8, (ps1FadeG * ps1FadeA) >> 8, (ps1FadeB * ps1FadeA) >> 8);
-        else
-            PS1ChainClear();
-        PS1UploadPalette();        // chained CLUT upload (fade / palette cycling)
+        // Chained FastFill of the buffer this frame draws into + chained CLUT uploads; both are
+        // rewritten by PS1FinalizePalette() (FlipScreen) with the end-of-frame palette.
+        psyqo::Color bg = PS1ClearColour();
+        s_clearPrim     = PS1ChainClear(bg.r, bg.g, bg.b);
+        PS1UploadPalette();
         PS1ChainInvalidateTPage();
     }
 #endif

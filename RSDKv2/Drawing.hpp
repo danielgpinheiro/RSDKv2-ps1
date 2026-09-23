@@ -64,6 +64,7 @@ int InitRenderDevice();
 void FlipScreen();
 #if RETRO_PLATFORM == RETRO_PS1
 void PS1UploadPalette();
+void PS1FinalizePalette(); // FlipScreen: end-of-frame palette into the chained CLUT uploads
 void PS1ResetSpriteSurfaces(); // stage change: forget VRAM placement of every surface
 void PS1BindSheet(int sheetID); // bind a named surface to the current stage atlas
 void PS1BindAllSheets();        // after an atlas load (player sheets persist across stages)
