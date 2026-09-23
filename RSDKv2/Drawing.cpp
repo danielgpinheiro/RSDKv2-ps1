@@ -1,6 +1,7 @@
 #include "RetroEngine.hpp"
 #if RETRO_PLATFORM == RETRO_PS1
 #include "common/syscalls/syscalls.h"
+#include "../ps1/sprite_atlas.hh"
 #endif
 
 
@@ -39,25 +40,9 @@ byte GraphicData[GFXDATA_MAX];
 //    Must start at >=320 halfwords to clear the framebuffer (X=0-319).
 #define PS1_CLUT_X 0
 #define PS1_CLUT_Y 240
-static int ps1PageSlotIdx = 0;
-static const int ps1PageSlotX[4] = { 5, 7, 5, 7 };
-static const int ps1PageSlotY[4] = { 0, 0, 1, 1 };
 #define PS1_TILE_PAGE_X 9
 #define PS1_TILE_PAGE_Y 0
 static bool ps1TileSetUploaded = false;
-
-static bool PS1AllocPages(int pagesX, int *outX, int *outY) {
-    // Slots are (5,0) (7,0) (5,1) (7,1): a 2-wide sheet must start at an even slot, or its
-    // second half would land on pageX 9 (tile pages).
-    if (pagesX == 2 && (ps1PageSlotIdx & 1))
-        ++ps1PageSlotIdx;
-    if (pagesX < 1 || pagesX > 2 || ps1PageSlotIdx + pagesX > 4)
-        return false;
-    *outX = ps1PageSlotX[ps1PageSlotIdx];
-    *outY = ps1PageSlotY[ps1PageSlotIdx];
-    ps1PageSlotIdx += pagesX;
-    return true;
-}
 
 void PS1UploadPalette() {
     static uint16_t clut[256];
@@ -73,22 +58,130 @@ void PS1UploadPalette() {
             c = 0x8000; // visible black -> non-transparent black for opaque commands
         clut[i] = c;
     }
-    PS1ChainUploadCLUT(clut, PS1_CLUT_X, PS1_CLUT_Y); // chained VRAM upload + cache flush
+    PS1ChainUploadRow(clut, 256, PS1_CLUT_X, PS1_CLUT_Y); // chained VRAM upload
+
+    // 4-bit atlas CLUTs map 16 values to master entries: rebuilt from the (faded / rotated)
+    // master CLUT every frame, uploaded as runs of adjacent slots in the same VRAM row.
+    static uint16_t clut4[PS1_ATLAS_MAX_CLUTS * 16];
+    for (int k = 0; k < g_ps1AtlasClutCount; ++k) {
+        const uint8_t *map = g_ps1AtlasCluts[k].map;
+        clut4[k * 16] = 0x0000; // transparent
+        for (int i = 1; i < 16; ++i) clut4[k * 16 + i] = clut[map[i]];
+    }
+    for (int k = 0; k < g_ps1AtlasClutCount;) {
+        int run = 1;
+        while (k + run < g_ps1AtlasClutCount && g_ps1AtlasCluts[k + run].y == g_ps1AtlasCluts[k].y
+               && g_ps1AtlasCluts[k + run].x == g_ps1AtlasCluts[k].x + 16 * run)
+            ++run;
+        PS1ChainUploadRow(&clut4[k * 16], run * 16, (int16_t)g_ps1AtlasCluts[k].x, (int16_t)g_ps1AtlasCluts[k].y);
+        k += run;
+    }
+    PS1ChainFlushCache(); // the GPU caches CLUTs
 }
 
-void PS1ResetSpriteVRAM() {
-    ps1PageSlotIdx = 0;
-    PS1ChainInvalidateTPage();
-}
+static void PS1ClearClusterCache();
 
 void PS1ResetSpriteSurfaces() {
-    // Sheets keep their pixels in GraphicData (except 15-bit direct surfaces), so any sheet
-    // still in use simply re-uploads into a fresh slot on its next draw.
     for (int i = 0; i < SURFACE_MAX; ++i) {
         GfxSurface[i].vramPageX    = -1;
         GfxSurface[i].vramDirect15 = false;
+        GfxSurface[i].atlasSheet   = -1;
     }
-    PS1ResetSpriteVRAM();
+    PS1ClearClusterCache(); // cluster indices change with the atlas
+    PS1ChainInvalidateTPage();
+}
+
+void PS1BindSheet(int sheetID) {
+    GFXSurface *s = &GfxSurface[sheetID];
+    s->atlasSheet = -1;
+    if (s->vramDirect15 || !s->fileName[0] || !g_ps1AtlasSheetCount)
+        return; // no atlas yet (player sheets at boot): bound at the next atlas load
+    int a = PS1AtlasFindSheet(s->fileName);
+    if (a < 0) {
+        ramsyscall_printf("[sprite] '%s' is not in this stage's atlas: not drawn\n", s->fileName);
+        s->width = s->height = 0;
+        return;
+    }
+    s->atlasSheet = (short)a;
+    s->width      = g_ps1AtlasSheets[a].width;
+    s->height     = g_ps1AtlasSheets[a].height;
+}
+
+void PS1BindAllSheets() {
+    for (int i = 0; i < SURFACE_MAX; ++i) PS1BindSheet(i);
+}
+
+// Atlas lookup: the cluster of atlas sheet `sheet` that holds texel (x, y). The same frames
+// are drawn every frame, so a small direct-mapped cache answers almost every call.
+struct PS1ClusterCacheEntry {
+    int16_t sheet, x, y, index;
+};
+static PS1ClusterCacheEntry s_clusterCache[64];
+volatile uint32_t g_ps1AtlasDrawMiss = 0; // draws whose texels are in no cluster (not in the atlas)
+
+static void PS1ClearClusterCache() { memset(s_clusterCache, 0xFF, sizeof(s_clusterCache)); }
+
+static const PS1AtlasCluster *PS1FindCluster(int sheet, int x, int y) {
+    PS1ClusterCacheEntry &e = s_clusterCache[((unsigned)x * 7 + (unsigned)y * 13 + (unsigned)sheet * 31) & 63];
+    if (e.sheet == sheet && e.x == x && e.y == y)
+        return &g_ps1AtlasClusters[e.index];
+    const PS1AtlasSheet &sh = g_ps1AtlasSheets[sheet];
+    for (int i = sh.firstCluster; i < sh.firstCluster + sh.clusterCount; ++i) {
+        const PS1AtlasCluster &c = g_ps1AtlasClusters[i];
+        if (x >= c.srcX && x < c.srcX + c.w && y >= c.srcY && y < c.srcY + c.h) {
+            e = PS1ClusterCacheEntry{(int16_t)sheet, (int16_t)x, (int16_t)y, (int16_t)i};
+            return &c;
+        }
+    }
+    g_ps1AtlasDrawMiss = g_ps1AtlasDrawMiss + 1;
+    return nullptr;
+}
+
+static psyqo::PrimPieces::TPageAttr PS1ClusterTPage(const PS1AtlasCluster *c) {
+    psyqo::PrimPieces::TPageAttr attr;
+    attr.set(c->depth == 4 ? psyqo::Prim::TPageAttr::ColorMode::Tex4Bits : psyqo::Prim::TPageAttr::ColorMode::Tex8Bits);
+    attr.setPageX(c->tpageX);
+    attr.setPageY(c->tpageY);
+    attr.set(psyqo::Prim::TPageAttr::SemiTrans::HalfBackAndHalfFront);
+    return attr;
+}
+
+static psyqo::PrimPieces::ClutIndex PS1ClusterClut(const PS1AtlasCluster *c) {
+    if (c->clut == 0xFFFF)
+        return psyqo::PrimPieces::ClutIndex(psyqo::Vertex{{.x = PS1_CLUT_X, .y = PS1_CLUT_Y}});
+    const PS1AtlasClut &k = g_ps1AtlasCluts[c->clut];
+    return psyqo::PrimPieces::ClutIndex(psyqo::Vertex{{.x = (int16_t)k.x, .y = (int16_t)k.y}});
+}
+
+// Draws sheet texels (sprX, sprY, w, h) at (XPos, YPos). A frame can span several clusters
+// (frames wider/taller than a texture page are cut by the atlas builder): draw the part in
+// the cluster under the top-left texel, then the strip to its right and the band below.
+static void PS1DrawAtlasRect(int sheet, int XPos, int YPos, int width, int height, int sprX, int sprY) {
+    struct Rect16 {
+        int16_t x, y, w, h;
+    } stack[16];
+    int sp      = 0;
+    stack[sp++] = Rect16{(int16_t)sprX, (int16_t)sprY, (int16_t)width, (int16_t)height};
+    while (sp) {
+        Rect16 r                 = stack[--sp];
+        const PS1AtlasCluster *c = PS1FindCluster(sheet, r.x, r.y);
+        if (!c)
+            continue;
+        int iw = c->srcX + c->w - r.x, ih = c->srcY + c->h - r.y;
+        if (iw > r.w) iw = r.w;
+        if (ih > r.h) ih = r.h;
+        PS1ChainTPage(PS1ClusterTPage(c));
+        psyqo::Prim::Sprite s(psyqo::Color{{.r = 0x80, .g = 0x80, .b = 0x80}});
+        s.position = psyqo::Vertex{{.x = (int16_t)(XPos + r.x - sprX), .y = (int16_t)(YPos + r.y - sprY)}};
+        s.size     = psyqo::Vertex{{.w = (int16_t)iw, .h = (int16_t)ih}};
+        s.texInfo  = psyqo::PrimPieces::TexInfo{(uint8_t)(c->u + r.x - c->srcX), (uint8_t)(c->v + r.y - c->srcY),
+                                               PS1ClusterClut(c)};
+        PS1ChainSprite(s);
+        if (r.w > iw && sp < 16)
+            stack[sp++] = Rect16{(int16_t)(r.x + iw), r.y, (int16_t)(r.w - iw), (int16_t)ih};
+        if (r.h > ih && sp < 16)
+            stack[sp++] = Rect16{r.x, (int16_t)(r.y + ih), r.w, (int16_t)(r.h - ih)};
+    }
 }
 
 // 15-bit (FMV) surfaces don't go through the CLUT, so a palette fade is re-created on the
@@ -112,14 +205,14 @@ static void PS1DirectFadeOverlay(int x, int y, int w, int h) {
 }
 
 bool PS1AllocDirectSurface(int sheetID) {
-    // A 15-bit texture page is 256 halfwords wide = two 8-bit sprite slots.
-    GFXSurface *s = &GfxSurface[sheetID];
-    int px, py;
-    if (!PS1AllocPages(2, &px, &py))
+    // The stage atlas reserves one 15-bit texture page (256 halfwords wide) for the FMV.
+    if (g_ps1AtlasFmvX == 0xFFFF)
         return false;
-    s->vramPageX    = px;
-    s->vramPageY    = py;
+    GFXSurface *s   = &GfxSurface[sheetID];
+    s->vramPageX    = g_ps1AtlasFmvX / 64;
+    s->vramPageY    = g_ps1AtlasFmvY / 256;
     s->vramDirect15 = true;
+    s->atlasSheet   = -1;
     return true;
 }
 
@@ -229,38 +322,6 @@ void PS1TileSelfTest() {
     PS1DrawTileQuad(100, 100, 188);
 }
 
-void PS1UploadSpriteSheet(int sheetID) {
-    GFXSurface *s = &GfxSurface[sheetID];
-    if (s->width <= 0 || s->height <= 0 || s->vramPageX >= 0)
-        return;
-    int pagesX = (s->width + 255) / 256;
-    if (pagesX > 2 || s->height > 256)
-        return; // too big for the GPU path; CPU fallback handles it
-    int px, py;
-    if (!PS1AllocPages(pagesX, &px, &py))
-        return; // out of texture pages; CPU fallback handles it
-    s->vramPageX = px;
-    s->vramPageY = py;
-
-    // Pack 8-bit indices into 16-bit halfwords (2 texels per halfword) and upload row by row.
-    const byte *src = &GraphicData[s->dataPosition];
-    // Uploads must be an even number of halfwords (psyqo aborts otherwise): pad the row.
-    // e.g. NexusTitle/Island.gif is 246 px = 123 halfwords -> 124.
-    int halfW      = (((s->width + 1) / 2) + 1) & ~1;
-    int vramHalfX  = px * 64; // pageX * 64 halfwords
-    int vramY      = py * 256;
-    alignas(4) static uint16_t row[256];
-    PS1GpuImmediate(); // immediate VRAM uploads: wait for the in-flight DMA chain
-    for (int y = 0; y < s->height; ++y) {
-        for (int x = 0; x < halfW; ++x) {
-            int i   = y * s->width + x * 2;
-            byte lo = (x * 2 < s->width) ? src[i] : 0; // padding halfword: transparent
-            byte hi = (x * 2 + 1 < s->width) ? src[i + 1] : 0;
-            row[x]  = (uint16_t)(lo | (hi << 8));
-        }
-        g_ps1GPU->uploadToVRAM(row, psyqo::Rect{{vramHalfX, vramY + y}, {halfW, 1}});
-    }
-}
 #endif
 
 int InitRenderDevice() {
@@ -2051,8 +2112,6 @@ void DrawSprite(int XPos, int YPos, int width, int height, int sprX, int sprY, i
 #if RETRO_PLATFORM == RETRO_PS1
     if (g_ps1GPU) {
         GFXSurface *surface = &GfxSurface[sheetID];
-        if (surface->vramPageX < 0 && surface->width > 0 && surface->height > 0)
-            PS1UploadSpriteSheet(sheetID);
         if (surface->vramDirect15) {
             // 15-bit surface (FMV): one texture page, texels are colours (no CLUT).
             psyqo::PrimPieces::TPageAttr attr;
@@ -2070,37 +2129,8 @@ void DrawSprite(int XPos, int YPos, int width, int height, int sprX, int sprY, i
             PS1DirectFadeOverlay(XPos, YPos, width, height);
             return;
         }
-        if (surface->vramPageX >= 0) {
-            int basePageX = surface->vramPageX;
-            int basePageY = surface->vramPageY;
-            int x         = sprX;
-            int remaining = width;
-            int drawX     = XPos;
-            while (remaining > 0) {
-                int chunkW = remaining;
-                int maxW   = 256 - (x & 0xFF);
-                if (chunkW > maxW)
-                    chunkW = maxW;
-                int pageX = basePageX + 2 * (x / 256);
-                int u     = x & 0xFF;
-                {
-                    psyqo::PrimPieces::TPageAttr attr;
-                    attr.set(psyqo::Prim::TPageAttr::ColorMode::Tex8Bits);
-                    attr.setPageX((uint8_t)pageX);
-                    attr.setPageY((uint8_t)basePageY);
-                    attr.set(psyqo::Prim::TPageAttr::SemiTrans::HalfBackAndHalfFront);
-                    PS1ChainTPage(attr);
-                }
-                psyqo::Prim::Sprite s(psyqo::Color{{.r = 0x80, .g = 0x80, .b = 0x80}});
-                s.position = psyqo::Vertex{{.x = (int16_t)drawX, .y = (int16_t)YPos}};
-                s.size     = psyqo::Vertex{{.w = (int16_t)chunkW, .h = (int16_t)height}};
-                s.texInfo  = psyqo::PrimPieces::TexInfo{(uint8_t)u, (uint8_t)sprY,
-                                                        psyqo::PrimPieces::ClutIndex(psyqo::Vertex{{.x = PS1_CLUT_X, .y = PS1_CLUT_Y}})};
-                PS1ChainSprite(s);
-                x += chunkW;
-                drawX += chunkW;
-                remaining -= chunkW;
-            }
+        if (surface->atlasSheet >= 0) {
+            PS1DrawAtlasRect(surface->atlasSheet, XPos, YPos, width, height, sprX, sprY);
             return;
         }
     }
@@ -2214,16 +2244,22 @@ void DrawScaledSprite(int direction, int XPos, int YPos, int pivotX, int pivotY,
     if (!g_ps1GPU)
         return;
     GFXSurface *surf = &GfxSurface[sheetID];
-    if (!surf->vramDirect15 && surf->vramPageX < 0 && surf->width > 0 && surf->height > 0)
-        PS1UploadSpriteSheet(sheetID);
-    int texPage = surf->vramPageX;
-    int u0      = sprX;
-    if (!surf->vramDirect15) { // 8-bit sheets span up to two texture pages of 256 texels
-        texPage += 2 * (sprX >> 8);
-        u0 = sprX & 0xFF;
+    if (width <= 0 || height <= 0)
+        return;
+    int texPage, texPageY, u0, v0;
+    const PS1AtlasCluster *cl = nullptr;
+    if (surf->vramDirect15) {
+        texPage = surf->vramPageX, texPageY = surf->vramPageY, u0 = sprX, v0 = sprY;
+    } else {
+        if (surf->atlasSheet < 0 || !(cl = PS1FindCluster(surf->atlasSheet, sprX, sprY)))
+            return;
+        texPage = cl->tpageX, texPageY = cl->tpageY;
+        u0 = cl->u + sprX - cl->srcX, v0 = cl->v + sprY - cl->srcY;
+        if (sprX + width > cl->srcX + cl->w || sprY + height > cl->srcY + cl->h)
+            return; // frame split across clusters: not needed scaled by any v2 script
     }
-    if (surf->vramPageX < 0 || width <= 0 || height <= 0 || u0 + width > 256 || sprY + height > 256)
-        return; // not uploaded, or crosses a texture page (not needed by any v2 script yet)
+    if (u0 + width > 256 || v0 + height > 256)
+        return;
     int sx = 4 * scaleX, sy = 4 * scaleY;
     if (sx <= 0 || sy <= 0)
         return;
@@ -2251,17 +2287,18 @@ void DrawScaledSprite(int direction, int XPos, int YPos, int pivotX, int pivotY,
         uR = u0 + tx1;
     }
     auto clampU = [](int u) { return (uint8_t)(u > 255 ? 255 : u); }; // 256 doesn't fit a UV byte
-    int vT = sprY + ty0, vB = sprY + ty1;
+    int vT = v0 + ty0, vB = v0 + ty1;
     uint8_t m = surf->vramDirect15 ? PS1DirectModulation() : 0x80;
     psyqo::Prim::TexturedQuad quad(psyqo::Color{{.r = m, .g = m, .b = m}});
     quad.pointA    = psyqo::Vertex{{.x = (int16_t)qx0, .y = (int16_t)qy0}};
     quad.uvA       = psyqo::PrimPieces::UVCoords{clampU(uL), clampU(vT)};
-    quad.clutIndex = psyqo::PrimPieces::ClutIndex(psyqo::Vertex{{.x = PS1_CLUT_X, .y = PS1_CLUT_Y}});
+    quad.clutIndex = cl ? PS1ClusterClut(cl) : psyqo::PrimPieces::ClutIndex();
     quad.pointB    = psyqo::Vertex{{.x = (int16_t)qx1, .y = (int16_t)qy0}};
     quad.uvB       = psyqo::PrimPieces::UVCoords{clampU(uR), clampU(vT)};
     quad.tpage.setPageX((uint8_t)texPage);
-    quad.tpage.setPageY((uint8_t)surf->vramPageY);
+    quad.tpage.setPageY((uint8_t)texPageY);
     quad.tpage.set(surf->vramDirect15 ? psyqo::Prim::TPageAttr::ColorMode::Tex16Bits
+                   : cl->depth == 4   ? psyqo::Prim::TPageAttr::ColorMode::Tex4Bits
                                       : psyqo::Prim::TPageAttr::ColorMode::Tex8Bits);
     quad.pointC = psyqo::Vertex{{.x = (int16_t)qx0, .y = (int16_t)qy1}};
     quad.uvC    = psyqo::PrimPieces::UVCoordsPadded{clampU(uL), clampU(vB), 0};
@@ -2456,35 +2493,33 @@ void DrawRotatedSprite(int direction, int XPos, int YPos, int pivotX, int pivotY
 #if RETRO_PLATFORM == RETRO_PS1
     if (g_ps1GPU) {
         GFXSurface *surf = &GfxSurface[sheetID];
-        if (surf->vramPageX < 0 && surf->width > 0 && surf->height > 0)
-            PS1UploadSpriteSheet(sheetID);
-        // Single-page only (sprite fits one 256x256 texture page). Wider sheets
-        // would need page-splitting across the rotation; fall back to the (invisible)
-        // software blit for those.
-        if (surf->vramPageX >= 0 && sprX + width <= 256 && sprY + height <= 256) {
+        // The frame must sit in one atlas cluster (one texture page); frames the atlas
+        // builder split across clusters aren't drawn rotated by any v2 script.
+        const PS1AtlasCluster *cl = surf->atlasSheet >= 0 ? PS1FindCluster(surf->atlasSheet, sprX, sprY) : nullptr;
+        if (cl && sprX + width <= cl->srcX + cl->w && sprY + height <= cl->srcY + cl->h) {
+            int u0 = cl->u + sprX - cl->srcX, v0 = cl->v + sprY - cl->srcY;
+            auto clampU = [](int u) { return (uint8_t)(u > 255 ? 255 : u); }; // 256 doesn't fit a UV byte
             // RSDKv2 corner order: FLIP_NONE -> [0]=TL [1]=TR [2]=BL [3]=BR.
             // FLIP_X mirrors X, so [1]=TL [0]=TR [3]=BL [2]=BR.
             int a = 0, b = 1, c = 2, d = 3;
             int uLeft, uRight;
             if (direction == FLIP_X) {
                 a = 1; b = 0; c = 3; d = 2;
-                uLeft = sprX + width; uRight = sprX;
+                uLeft = u0 + width; uRight = u0;
             } else {
-                uLeft = sprX; uRight = sprX + width;
+                uLeft = u0; uRight = u0 + width;
             }
             psyqo::Prim::TexturedQuad quad(psyqo::Color{{.r = 0x80, .g = 0x80, .b = 0x80}});
             quad.pointA    = psyqo::Vertex{{.x = (int16_t)XPositions[a], .y = (int16_t)YPositions[a]}};
-            quad.uvA       = psyqo::PrimPieces::UVCoords{(uint8_t)uLeft, (uint8_t)sprY};
-            quad.clutIndex = psyqo::PrimPieces::ClutIndex(psyqo::Vertex{{.x = PS1_CLUT_X, .y = PS1_CLUT_Y}});
+            quad.uvA       = psyqo::PrimPieces::UVCoords{clampU(uLeft), (uint8_t)v0};
+            quad.clutIndex = PS1ClusterClut(cl);
             quad.pointB    = psyqo::Vertex{{.x = (int16_t)XPositions[b], .y = (int16_t)YPositions[b]}};
-            quad.uvB       = psyqo::PrimPieces::UVCoords{(uint8_t)uRight, (uint8_t)sprY};
-            quad.tpage.setPageX((uint8_t)surf->vramPageX);
-            quad.tpage.setPageY((uint8_t)surf->vramPageY);
-            quad.tpage.set(psyqo::Prim::TPageAttr::ColorMode::Tex8Bits);
+            quad.uvB       = psyqo::PrimPieces::UVCoords{clampU(uRight), (uint8_t)v0};
+            quad.tpage     = PS1ClusterTPage(cl);
             quad.pointC = psyqo::Vertex{{.x = (int16_t)XPositions[c], .y = (int16_t)YPositions[c]}};
-            quad.uvC    = psyqo::PrimPieces::UVCoordsPadded{(uint8_t)uLeft, (uint8_t)(sprY + height), 0};
+            quad.uvC    = psyqo::PrimPieces::UVCoordsPadded{clampU(uLeft), clampU(v0 + height), 0};
             quad.pointD = psyqo::Vertex{{.x = (int16_t)XPositions[d], .y = (int16_t)YPositions[d]}};
-            quad.uvD    = psyqo::PrimPieces::UVCoordsPadded{(uint8_t)uRight, (uint8_t)(sprY + height), 0};
+            quad.uvD    = psyqo::PrimPieces::UVCoordsPadded{clampU(uRight), clampU(v0 + height), 0};
             PS1ChainQuad(quad);
             return;
         }

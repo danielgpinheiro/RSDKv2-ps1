@@ -40,11 +40,18 @@ void LoadPlayerAnimation(const char *filePath, int playerID)
                 StrCopy(buffer, "Data/Sprites/");
                 StrAdd(buffer, strBuf);
 
+#if RETRO_PLATFORM == RETRO_PS1
+                // Player sheets are in every stage atlas: register the name, bound (again)
+                // at each atlas load (no runtime LZW; golden rule).
+                StrCopy(GfxSurface[s + 4 * playerID + 16].fileName, buffer);
+                PS1BindSheet(s + 4 * playerID + 16);
+#else
                 switch (strBuf[i - 1]) {
                     case 'f': LoadGIFFile(buffer, s + 4 * playerID + 16); break;
                     case 'p': LoadBMPFile(buffer, s + 4 * playerID + 16); break;
                     case 'x': LoadGFXFile(buffer, s + 4 * playerID + 16); break;
                 }
+#endif
                 sheetIDs[s] = (4 * playerID + 16) + s;
 
                 SetFileInfo(&info);

@@ -4,7 +4,9 @@
 #define SPRITESHEETS_MAX (16)
 #define SURFACE_MAX      (24)
 #if RETRO_PLATFORM == RETRO_PS1
-#define GFXDATA_MAX      (0x60000)
+// PS1: sprites live in VRAM only (per-stage atlas, ps1/sprite_atlas.*); GraphicData is a
+// stub kept so the (unreachable) software-renderer code still links.
+#define GFXDATA_MAX      (0x10)
 #else
 #define GFXDATA_MAX      (0x400000)
 #endif
@@ -36,6 +38,7 @@ struct GFXSurface {
     int vramPageX; // texture page X (N*64 halfwords); -1 = not uploaded
     int vramPageY; // texture page Y (N*256 lines)
     bool vramDirect15; // 15-bit texture written straight to VRAM (FMV): no CLUT, no GraphicData
+    short atlasSheet;  // sheet index in the current stage atlas, -1 = none (not drawn)
 #endif
 };
 
@@ -61,10 +64,10 @@ int InitRenderDevice();
 void FlipScreen();
 #if RETRO_PLATFORM == RETRO_PS1
 void PS1UploadPalette();
-void PS1UploadSpriteSheet(int sheetID);
-void PS1ResetSpriteVRAM();
-void PS1ResetSpriteSurfaces(); // stage change: every sheet re-uploads lazily into fresh slots
-bool PS1AllocDirectSurface(int sheetID); // 15-bit surface (<= 256x256): one 15-bit texture page
+void PS1ResetSpriteSurfaces(); // stage change: forget VRAM placement of every surface
+void PS1BindSheet(int sheetID); // bind a named surface to the current stage atlas
+void PS1BindAllSheets();        // after an atlas load (player sheets persist across stages)
+bool PS1AllocDirectSurface(int sheetID); // 15-bit surface: the atlas' reserved FMV page
 void PS1TileSelfTest();
 #endif
 void ReleaseRenderDevice();

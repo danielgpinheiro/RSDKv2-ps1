@@ -2,6 +2,7 @@
 #include <stdlib.h>
 #if RETRO_PLATFORM == RETRO_PS1
 #include "common/syscalls/syscalls.h"
+#include "../ps1/sprite_atlas.hh"
 #endif
 
 int stageListCount[STAGELIST_MAX];
@@ -236,7 +237,10 @@ void LoadStageFiles(void) {
         ClearScriptData();
         for (int i = SPRITESHEETS_MAX; i > 0; i--) RemoveGraphicsFile((char *)"", i - 1);
 #if RETRO_PLATFORM == RETRO_PS1
-        PS1ResetSpriteSurfaces(); // free all sprite VRAM slots; kept sheets (player) re-upload lazily
+        // Sprites: this stage's atlas goes straight to VRAM; kept sheets (player) re-bind.
+        PS1ResetSpriteSurfaces();
+        PS1AtlasLoad(stageList[ActiveStageList][StageListPosition].folder);
+        PS1BindAllSheets();
 #endif
 
 #if RETRO_PLATFORM == RETRO_PS1

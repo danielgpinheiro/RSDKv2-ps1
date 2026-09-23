@@ -33,6 +33,8 @@ void PS1GpuImmediate();              // wait for the in-flight chain before an i
 
 void PS1ChainClear(uint8_t r = 0, uint8_t g = 0, uint8_t b = 0); // FastFill the next draw buffer
 void PS1ChainUploadCLUT(const uint16_t *clut256, int16_t x, int16_t y); // 256-entry CLUT + cache flush
+void PS1ChainUploadRow(const uint16_t *data, int n, int16_t x, int16_t y); // n (even) halfwords, no flush
+void PS1ChainFlushCache();                                     // after CLUT/texture changes
 void PS1ChainTPage(psyqo::PrimPieces::TPageAttr attr);         // skipped if identical to the last one
 void PS1ChainInvalidateTPage();                                // GPU texpage state unknown
 void PS1ChainSprite16(const psyqo::Prim::Sprite16x16 &s);      // batched (tiles)

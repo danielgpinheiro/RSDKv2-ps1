@@ -16,7 +16,12 @@
  *       u32 0 (frameStartPtr, set at runtime)
  *   PlayerScript[PLAYER_COUNT]: i32 mainCode, i32 mainJump, i32 stateCode[256], i32 stateJump[256]
  *
- * Usage: rsdkscript <root containing Data/> <output dir> [--legacy-ssz FILE]
+ * Usage: rsdkscript <root containing Data/> <output dir> [--legacy-ssz FILE] [--manifest DIR]
+ *
+ * --manifest DIR also writes DIR/<StageFolder>.txt for the sprite atlas builder
+ * (tools/atlas/build_atlas.py): one "script <path under Data/Scripts/>" line per script in
+ * load order (globals, stage, players) and one "ani <file under Data/Animations/>" line per
+ * player animation file.
  */
 #include "RetroEngine.hpp"
 
@@ -38,6 +43,7 @@ static std::string readStr() {
 
 struct GameConfigInfo {
     std::vector<std::string> globalScripts;
+    std::vector<std::string> playerAnims;
     std::vector<std::string> playerScripts;
     std::vector<std::string> stageFolders; // unique, in list order
 };
@@ -64,7 +70,7 @@ static bool readGameConfig(GameConfigInfo &gc) {
     for (int i = 0; i < count; ++i) readStr();
     FileRead(&count, 1); // players: anim, script, name
     for (int p = 0; p < count; ++p) {
-        readStr();
+        gc.playerAnims.push_back(readStr());
         gc.playerScripts.push_back(readStr());
         readStr();
     }
@@ -87,7 +93,10 @@ static bool readGameConfig(GameConfigInfo &gc) {
 }
 
 // Mirrors the script part of LoadStageFiles (RSDKv2/Scene.cpp).
+static std::vector<std::string> s_stageScripts; // scripts of the last compiled stage, load order
+
 static bool compileStage(const GameConfigInfo &gc, const std::string &folder, int *parsedCount) {
+    s_stageScripts.clear();
     ClearScriptData();
     int scriptID = 2;
     std::string cfg = "Data/Stages/" + folder + "/StageConfig.bin";
@@ -100,6 +109,7 @@ static bool compileStage(const GameConfigInfo &gc, const std::string &folder, in
     int parsed = 0;
     if (loadGlobals) {
         for (const auto &s : gc.globalScripts) {
+            s_stageScripts.push_back(s);
             ParseScriptFile((char *)s.c_str(), scriptID++);
             ++parsed;
         }
@@ -117,12 +127,14 @@ static bool compileStage(const GameConfigInfo &gc, const std::string &folder, in
         for (int i = 0; i < n; ++i) stageScripts.push_back(readStr());
         CloseFile();
         for (int i = 0; i < n; ++i) {
+            s_stageScripts.push_back(stageScripts[i]);
             ParseScriptFile((char *)stageScripts[i].c_str(), scriptID + i);
             ++parsed;
         }
     }
     for (int p = 0; p < PLAYER_COUNT && p < (int)gc.playerScripts.size(); ++p) {
         if (!gc.playerScripts[p].empty()) {
+            s_stageScripts.push_back(gc.playerScripts[p]);
             ParseScriptFile((char *)gc.playerScripts[p].c_str(), p);
             ++parsed;
         }
@@ -215,11 +227,22 @@ int main(int argc, char **argv) {
         fprintf(stderr, "usage: %s <root containing Data/> <output dir> [--legacy-ssz FILE]\n", argv[0]);
         return 2;
     }
-    const char *legacy = (argc >= 5 && !strcmp(argv[3], "--legacy-ssz")) ? argv[4] : nullptr;
+    const char *legacy = nullptr;
+    std::string manifestDir;
+    for (int a = 3; a + 1 < argc; a += 2) {
+        if (!strcmp(argv[a], "--legacy-ssz"))
+            legacy = argv[a + 1];
+        else if (!strcmp(argv[a], "--manifest"))
+            manifestDir = argv[a + 1];
+    }
     std::string outDir = argv[2];
     char cwd[1024];
     if (outDir[0] != '/' && getcwd(cwd, sizeof(cwd)))
         outDir = std::string(cwd) + "/" + outDir;
+    if (!manifestDir.empty() && manifestDir[0] != '/' && getcwd(cwd, sizeof(cwd)))
+        manifestDir = std::string(cwd) + "/" + manifestDir;
+    if (!manifestDir.empty())
+        mkdir(manifestDir.c_str(), 0755);
     if (chdir(argv[1]) != 0) {
         perror(argv[1]);
         return 2;
@@ -250,6 +273,17 @@ int main(int argc, char **argv) {
                ScriptDataPos, JumpTableDataPos, out.c_str());
         if (legacy && folder == "SSZ")
             rc |= compareLegacy(legacy);
+        if (!manifestDir.empty()) {
+            std::string mpath = manifestDir + "/" + folder + ".txt";
+            FILE *m = ::fopen(mpath.c_str(), "w");
+            if (!m) {
+                fprintf(stderr, "cannot write %s\n", mpath.c_str());
+                return 1;
+            }
+            for (const auto &sc : s_stageScripts) fprintf(m, "script %s\n", sc.c_str());
+            for (const auto &an : gc.playerAnims) fprintf(m, "ani %s\n", an.c_str());
+            ::fclose(m);
+        }
     }
     return rc;
 }

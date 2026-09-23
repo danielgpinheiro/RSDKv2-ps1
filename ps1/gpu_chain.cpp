@@ -116,21 +116,30 @@ void PS1ChainClear(uint8_t r, uint8_t g, uint8_t b) {
     s_gpu->chain(*frag);
 }
 
-void PS1ChainUploadCLUT(const uint16_t *clut256, int16_t x, int16_t y) {
+void PS1ChainUploadRow(const uint16_t *data, int count, int16_t x, int16_t y) {
     flushBatch();
-    for (int off = 0; off < 256; off += PS1_CLUT_CHUNK) {
-        int n    = (256 - off < PS1_CLUT_CHUNK) ? (256 - off) : PS1_CLUT_CHUNK; // 22 x 11 + 14
+    for (int off = 0; off < count; off += PS1_CLUT_CHUNK) {
+        int n    = (count - off < PS1_CLUT_CHUNK) ? (count - off) : PS1_CLUT_CHUNK; // 256 = 22 x 11 + 14
         auto *fr = allocRaw<ClutChunkFragment>();
         if (!fr)
             return;
         new (&fr->upload) psyqo::Prim::VRAMUpload();
         fr->upload.region = psyqo::Rect{{(int16_t)(x + off), y}, {(int16_t)n, 1}};
-        memcpy(fr->data, clut256 + off, n * sizeof(uint16_t));
+        memcpy(fr->data, data + off, n * sizeof(uint16_t));
         fr->words = (unsigned)(sizeof(psyqo::Prim::VRAMUpload) / 4 + n / 2); // n is even
         s_gpu->chain(*fr);
     }
-    // The GPU caches the CLUT: flush after changing it at the same VRAM location.
+}
+
+void PS1ChainFlushCache() {
+    flushBatch();
     chainSimple(psyqo::Prim::FlushCache());
+}
+
+void PS1ChainUploadCLUT(const uint16_t *clut256, int16_t x, int16_t y) {
+    PS1ChainUploadRow(clut256, 256, x, y);
+    // The GPU caches the CLUT: flush after changing it at the same VRAM location.
+    PS1ChainFlushCache();
 }
 
 void PS1ChainTPage(psyqo::PrimPieces::TPageAttr attr) {

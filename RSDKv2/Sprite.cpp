@@ -207,17 +207,6 @@ int AddGraphicsFile(const char *filePath) {
 
     StrCopy(sheetPath, "Data/Sprites/");
     StrAdd(sheetPath, filePath);
-#if RETRO_PLATFORM == RETRO_PS1
-    // Sprites are pre-converted to .gfx at build time (no LZW decode on PS1): X.gif -> X.gfx.
-    // Done before the lookup below so an already-loaded sheet is found under its .gfx name.
-    {
-        int sl = StrLength(sheetPath);
-        if (sl >= 4 && sheetPath[sl - 4] == '.' && sheetPath[sl - 3] == 'g' && sheetPath[sl - 2] == 'i' && sheetPath[sl - 1] == 'f') {
-            sheetPath[sl - 2] = 'f';
-            sheetPath[sl - 1] = 'x';
-        }
-    }
-#endif
     int sheetID = 0;
     while (StrLength(GfxSurface[sheetID].fileName) > 0) {
         if (StrComp(GfxSurface[sheetID].fileName, sheetPath))
@@ -229,13 +218,14 @@ int AddGraphicsFile(const char *filePath) {
     }
     byte fileExtension = (byte)sheetPath[(StrLength(sheetPath) - 1) & 0xFF];
 #if RETRO_PLATFORM == RETRO_PS1
-    ramsyscall_printf("[sprite] '%s' id=%d gfxpos=%d\n", sheetPath, sheetID, GfxDataPosition);
-#endif
-#if RETRO_PLATFORM == RETRO_PS1
-    if (ps1SkipSprites) {
+    if (fileExtension != 'v') {
+        // Sheets are in the stage's VRAM atlas (built by tools/atlas, loaded by
+        // LoadStageFiles): register the name, nothing is read or decoded here.
         StrCopy(GfxSurface[sheetID].fileName, sheetPath);
-        GfxSurface[sheetID].width  = 0;
-        GfxSurface[sheetID].height = 0;
+        if (ps1SkipSprites)
+            GfxSurface[sheetID].width = GfxSurface[sheetID].height = 0;
+        else
+            PS1BindSheet(sheetID);
         return sheetID;
     }
 #endif
@@ -245,11 +235,6 @@ int AddGraphicsFile(const char *filePath) {
         case 'v': LoadRSVFile(sheetPath, sheetID); break;
         case 'x': LoadGFXFile(sheetPath, sheetID); break;
     }
-#if RETRO_PLATFORM == RETRO_PS1
-    ramsyscall_printf("[sprite] done id=%d w=%d h=%d gfxpos=%d\n", sheetID, GfxSurface[sheetID].width,
-                      GfxSurface[sheetID].height, GfxDataPosition);
-#endif
-
     return sheetID;
 }
 void RemoveGraphicsFile(const char *filePath, int sheetID) {
@@ -263,21 +248,15 @@ void RemoveGraphicsFile(const char *filePath, int sheetID) {
     if (sheetID >= 0 && StrLength(GfxSurface[sheetID].fileName)) {
         StrCopy(GfxSurface[sheetID].fileName, "");
 #if RETRO_PLATFORM == RETRO_PS1
-        if (GfxSurface[sheetID].vramDirect15) { // FMV surface: pixels live only in VRAM
-            GfxSurface[sheetID].vramDirect15 = false;
-            GfxSurface[sheetID].width = GfxSurface[sheetID].height = 0;
-            return;
-        }
+        // Pixels live in VRAM (atlas / FMV page), never in GraphicData: just forget the sheet.
+        GfxSurface[sheetID].vramDirect15 = false;
+        GfxSurface[sheetID].atlasSheet   = -1;
+        GfxSurface[sheetID].width = GfxSurface[sheetID].height = 0;
+        return;
 #endif
         int dataPosStart = GfxSurface[sheetID].dataPosition;
         int dataPosEnd   = GfxSurface[sheetID].dataPosition + GfxSurface[sheetID].height * GfxSurface[sheetID].width;
-#if RETRO_PLATFORM == RETRO_PS1
-        // PC compacts a 2 MB buffer (0x200000); PS1's GraphicData is GFXDATA_MAX, so only move
-        // the bytes in use (the PC literal wrote far past the array and trashed RAM).
-        for (int i = GfxDataPosition - dataPosEnd; i > 0; --i) GraphicData[dataPosStart++] = GraphicData[dataPosEnd++];
-#else
         for (int i = 0x200000 - dataPosEnd; i > 0; --i) GraphicData[dataPosStart++] = GraphicData[dataPosEnd++];
-#endif
         GfxDataPosition -= GfxSurface[sheetID].height * GfxSurface[sheetID].width;
         for (int i = 0; i < SURFACE_MAX; ++i) {
             if (GfxSurface[i].dataPosition > GfxSurface[sheetID].dataPosition)
@@ -287,6 +266,10 @@ void RemoveGraphicsFile(const char *filePath, int sheetID) {
 }
 
 int LoadBMPFile(const char *filePath, byte sheetID) {
+#if RETRO_PLATFORM == RETRO_PS1
+    ramsyscall_printf("[sprite] no runtime image decode on PS1: '%s' (use the stage atlas)\n", filePath);
+    return false;
+#endif
     FileInfo info;
     if (LoadFile(filePath, &info)) {
         GFXSurface *surface = &GfxSurface[sheetID];
@@ -336,6 +319,10 @@ int LoadBMPFile(const char *filePath, byte sheetID) {
     return false;
 }
 int LoadGIFFile(const char *filePath, byte sheetID) {
+#if RETRO_PLATFORM == RETRO_PS1
+    ramsyscall_printf("[sprite] no runtime image decode on PS1: '%s' (use the stage atlas)\n", filePath);
+    return false;
+#endif
     FileInfo info;
     if (LoadFile(filePath, &info)) {
         GFXSurface *surface = &GfxSurface[sheetID];
@@ -403,18 +390,15 @@ int LoadGIFFile(const char *filePath, byte sheetID) {
     }
     return false;
 }
-#if RETRO_PLATFORM == RETRO_PS1
-volatile uint32_t g_ps1SpriteRefused = 0; // GDB-visible: sheets refused by LoadGFXFile
-#endif
 int LoadGFXFile(const char *filePath, byte sheetID) {
+#if RETRO_PLATFORM == RETRO_PS1
+    ramsyscall_printf("[sprite] no runtime image decode on PS1: '%s' (use the stage atlas)\n", filePath);
+    return false;
+#endif
     FileInfo info;
     if (LoadFile(filePath, &info)) {
         GFXSurface *surface = &GfxSurface[sheetID];
         StrCopy(surface->fileName, filePath);
-#if RETRO_PLATFORM == RETRO_PS1
-        surface->vramPageX    = -1; // a reused sheet slot must not inherit the old VRAM page
-        surface->vramDirect15 = false;
-#endif
 
         byte fileBuffer = 0;
         FileRead(&fileBuffer, 1);
@@ -426,22 +410,6 @@ int LoadGFXFile(const char *filePath, byte sheetID) {
         FileRead(&fileBuffer, 1);
         surface->height += fileBuffer;
 
-#if RETRO_PLATFORM == RETRO_PS1
-        // Refuse sheets the PS1 can't hold instead of overflowing GraphicData (which wraps to
-        // 0 and overwrites loaded sheets) or keeping pixels the GPU path can never draw
-        // (PS1UploadSpriteSheet: <= 512x256). The name stays set so later loads of the same
-        // sheet hit the lookup; a 0x0 surface is never drawn. Real fix: sprite pipeline phase.
-        if (surface->width > 512 || surface->height > 256
-            || GfxDataPosition + surface->width * surface->height > GFXDATA_MAX) {
-            ramsyscall_printf("[sprite] REFUSED '%s' %dx%d gfxpos=%d\n", filePath, surface->width, surface->height,
-                              GfxDataPosition);
-            ++g_ps1SpriteRefused;
-            surface->width  = 0;
-            surface->height = 0;
-            CloseFile();
-            return false;
-        }
-#endif
         byte clr[3];
         for (int i = 0; i < 0xFF; ++i) FileRead(&clr, 3); // Palette
 

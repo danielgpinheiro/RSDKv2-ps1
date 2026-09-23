@@ -47,6 +47,7 @@ ps1/mdec.cpp \
 ps1/video.cpp \
 ps1/gpu_chain.cpp \
 ps1/cdrom_stream.cpp \
+ps1/sprite_atlas.cpp \
 
 # Engine include dir (belt-and-suspenders; quote-includes resolve relative to the .cpp anyway).
 # ps1/libc comes FIRST: its C/C++ shim headers (<string>, <cmath>, <stdio.h>, ...)
@@ -94,6 +95,11 @@ ps1/mdec.o: CPPFLAGS += -O2
 bytecode:
 	$(MAKE) -C tools/rsdkscript
 	mkdir -p build/iso/Data/Scripts/Bytecode
-	tools/rsdkscript/rsdkscript build/iso build/iso/Data/Scripts/Bytecode
+	tools/rsdkscript/rsdkscript build/iso build/iso/Data/Scripts/Bytecode --manifest build/manifest
 
-.PHONY: bytecode
+# Build-time sprite atlas per stage (tools/atlas/build_atlas.py, needs PIL + numpy from the
+# system python): every frame a stage can draw, packed 4/8-bit into VRAM pages + CLUT maps.
+atlas: bytecode
+	/usr/bin/python3 tools/atlas/build_atlas.py build/iso/Data build/manifest
+
+.PHONY: bytecode atlas
