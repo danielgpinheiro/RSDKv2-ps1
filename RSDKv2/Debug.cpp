@@ -44,7 +44,9 @@ void InitSystemMenu() {
     PaletteMode = 0;
 
 #if !RETRO_USE_ORIGINAL_CODE
-    if (Engine.UseBinFile && !Engine.devMenu
+    // PS1: the loose Data/ tree on the disc is the release layout (no Data.bin), so boot
+    // straight into the game (stage list 0 / stage 0 = NIntro) instead of the dev menu.
+    if (Engine.UseBinFile && !Engine.devMenu || RETRO_PLATFORM == RETRO_PS1
         || ((Engine.startList_Game != 0xFF && Engine.startList_Game) || (Engine.startStage_Game != 0xFF && Engine.startStage_Game))) {
 #else
     if (Engine.UseBinFile) {

@@ -52,6 +52,11 @@ ps1/cdrom_stream.cpp \
 # ps1/libc comes FIRST: its C/C++ shim headers (<string>, <cmath>, <stdio.h>, ...)
 # shadow any system headers the freestanding toolchain might otherwise surface.
 CPPFLAGS = -I ps1/libc -I RSDKv2
+# `make BOOT=SSZ`: skip the intro and force-load SSZ Act 1 (regression harness /
+# baselines in tools/). Default: natural boot (Retro logo -> intro FMV -> title).
+ifeq ($(BOOT),SSZ)
+CPPFLAGS += -DPS1_BOOT_SSZ=1
+endif
 # C++20 is the minimum required by psyqo.
 CXXFLAGS = -std=c++20
 

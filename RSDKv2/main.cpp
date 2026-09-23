@@ -110,8 +110,9 @@ class RSDKv2PS1App final : public psyqo::Application {
         return;
 #endif
 
-        // Force-load a real stage (skip the title screen) to test tile rendering
-        // without input. Temporary until PAD input (overall Phase 4) is wired.
+#if PS1_BOOT_SSZ
+        // `make BOOT=SSZ`: force-load SSZ Act 1 (skips the intro) for the regression
+        // harness and the tools/baseline captures.
         // NOTE: use a manual copy, not strcpy — the PS1 libc strcpy may be a stub.
         {
             const char *scnFolder = "SSZ";
@@ -129,6 +130,7 @@ class RSDKv2PS1App final : public psyqo::Application {
             }
             Engine.startSceneID[b] = 0;
         }
+#endif
 
         Engine.Init();
         syscall_puts("[RSDKv2-PS1] Engine.Init() returned\n");
