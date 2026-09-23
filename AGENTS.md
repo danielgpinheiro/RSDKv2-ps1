@@ -43,26 +43,29 @@ timeout 60 /Applications/PCSX-Redux.app/Contents/MacOS/PCSX-Redux -run -fastboot
 | `ps1/cdrom_stream.*` | continuous CD streaming (`CDRomDevice::Action` subclass, ring buffer) |
 | `tools/` | test harness (`run_test.sh`, `frame_capture.sh`, baselines), `rsdkscript` bytecode compiler, FMV tools |
 | `ps1/libc/` | Freestanding libc/C++ shims (EASTL-backed `std::`), must stay first on `-I` |
-| `*.py` (root) | Build-time asset pipeline (`extract_loose`, `convert_tiles`, `repack_gfx`, `convert_gfx --loose`, `convert_fmv`); `make bytecode` runs `tools/rsdkscript` |
+| `*.py` (root) | Build-time asset pipeline (`extract_loose`, `convert_tiles`, `convert_fmv`); `make bytecode` runs `tools/rsdkscript`, `make atlas` also `tools/atlas/build_atlas.py` |
+| `ps1/sprite_atlas.*` | per-stage sprite atlas loader (tables + VRAM blocks from `Data/Sprites/Atlas/<Stage>.atl`) |
 | `build/iso/` | ISO root = the disc: `Data/**` loose assets + `PSX.EXE` only |
 | `build/fmv-src/`, `build/Data.bin.*` | build inputs kept off the disc (`Intro.rsv`, reference `.mdec`, datapack backups) |
 | `.hermes/plans/` | Previous agent's plans (gitignored, useful history) |
 
 ## Invariants — don't break these
-- **2 MB RAM.** Check `mipsel-none-elf-size` after every change; ~239 KB heap never used in
-  SSZ; during the intro FMV (235 KB borrowed) only ~14 KB is left. No per-frame `new`/`malloc`. Grep for PC literals after shrinking any
+- **2 MB RAM.** Check `mipsel-none-elf-size` after every change; ~624 KB heap never used in
+  SSZ (sprites live in VRAM, `GraphicData` is a stub); the intro FMV borrows 235 KB. No per-frame `new`/`malloc`. Grep for PC literals after shrinking any
   `#define` (`TILE_COUNT 0x400`, `TILELAYER_CHUNK_W 0x100`, `TILELAYER_CHUNK_H 0x10`,
-  `CHUNKTILE_COUNT 0x200*64`, `LAYER_COUNT 4`, `GFXDATA_MAX 0x60000`, `SCRIPTDATA_COUNT 0x8000`).
-- **VRAM map**: FB at (0,0) and (0,256) 320×240; CLUT at (0,240); sprite page slots pageX 5/7
-  × pageY 0/1 (reset every stage load; the FMV texture takes slots 2+3); tile pages pageX
-  9/11 × pageY 0/1. Texture pages must stay at pageX ≥ 5 (pageX is ×64 halfwords).
+  `CHUNKTILE_COUNT 0x200*64`, `LAYER_COUNT 4`, `GFXDATA_MAX 0x10` (stub), `SCRIPTDATA_COUNT 0x8000`).
+- **VRAM map**: FB at (0,0) and (0,256) 320×240; master CLUT at (0,240); 4-bit atlas CLUTs in
+  rows 240–255 / 496–511 under the FBs; sprite atlas columns pageX 5–8 and 13–15 (per-stage
+  `.atl`, the FMV page reserved in NIntro); tile pages pageX 9/11 × pageY 0/1.
 - **CLUT index 0 = transparent (0x0000); visible black = 0x8000.** Sprites use modulation
   colour 0x80 (not raw mode).
-- **Golden rule**: no runtime GIF/LZW/script parsing. Add a build step instead. (Known
-  exception to remove in phase 3d: player sheets via `LoadGIFFile` in `Animation.cpp`.)
-- **Sprite sheets**: `X.gif` loads `X.gfx`; sheets > 512×256 or overflowing `GraphicData`
-  are refused (`g_ps1SpriteRefused`). Anything that sizes a copy by a PC literal
-  (`0x200000`…) instead of `GFXDATA_MAX`/`GfxDataPosition` corrupts RAM.
+- **Golden rule**: no runtime GIF/LZW/script parsing. Add a build step instead.
+- **Sprites = per-stage atlas** (`make atlas`, `ps1/sprite_atlas.*`): sheets are registered by
+  name and bound at each atlas load; a new/changed script, sheet or `.ani` needs `make atlas`
+  (the builder fails if a stage doesn't fit or a frame doesn't decode back exactly). Anything
+  that sizes a copy by a PC literal (`0x200000`…) corrupts RAM.
+- **Palette**: CLUT uploads + clear are filled in `FlipScreen` (`PS1FinalizePalette`), like
+  PC's end-of-frame palette; don't upload CLUT data elsewhere in the frame.
 - **Script VM guards** (`Div`/`Rand` by 0, opcode bounds) stay in place.
 - Hardware access belongs in `Application::start()`/`frame()`, not `prepare()`.
 - **Per-frame drawing is DMA-chained** (`ps1/gpu_chain.hh`): no `sendPrimitive`/`clear`/
