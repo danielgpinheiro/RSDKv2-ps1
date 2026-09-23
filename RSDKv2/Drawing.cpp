@@ -271,6 +271,8 @@ bool PS1AllocDirectSurface(int sheetID) {
 
 // Upload the stage tile set: 16x16Tiles.vram holds 4 pages already packed in texture-page
 // layout at build time (convert_tiles.py), so each page is one 64 KB read + one DMA.
+void PS1InvalidateTileSet() { ps1TileSetUploaded = false; } // stage change: next frame uploads the new set
+
 void PS1UploadTileSet() {
     if (ps1TileSetUploaded)
         return;

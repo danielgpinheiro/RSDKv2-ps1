@@ -241,6 +241,7 @@ void LoadStageFiles(void) {
         PS1ResetSpriteSurfaces();
         PS1AtlasLoad(stageList[ActiveStageList][StageListPosition].folder);
         PS1BindAllSheets();
+        PS1InvalidateTileSet(); // tiles were uploaded once per boot: NTitle/SSZ kept NIntro's
 #endif
 
 #if RETRO_PLATFORM == RETRO_PS1
