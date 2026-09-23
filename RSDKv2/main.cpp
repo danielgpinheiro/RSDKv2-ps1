@@ -4,6 +4,7 @@
 #include <psyqo/application.hh>
 #include <psyqo/gpu.hh>
 #include <psyqo/cdrom-device.hh>
+#include <psyqo/advancedpad.hh>
 #include "common/syscalls/syscalls.h"
 #include "../ps1/video.hh"
 #include "../ps1/gpu_chain.hh"
@@ -57,6 +58,7 @@ __attribute__((noinline)) static void PS1PerfTick(psyqo::GPU &gpu) {
 }
 
 psyqo::GPU         *g_ps1GPU   = nullptr;
+psyqo::AdvancedPad *g_ps1Pad   = nullptr; // Input.cpp ReadInputDevice (PS1 branch)
 psyqo::CDRomDevice *g_ps1CDRom = nullptr;
 bool ps1SkipSprites = PS1_SKIP_SPRITES;
 
@@ -92,6 +94,7 @@ static void PS1VideoSelfTest() {
 class RSDKv2PS1App final : public psyqo::Application {
   public:
     psyqo::CDRomDevice m_cdrom;
+    psyqo::AdvancedPad m_pad;
 
     // psyqo lifecycle: prepare() runs with IRQs disabled — only configure objects
     // here (GPU init, CDRomDevice::prepare). All hardware I/O (CD reset, file loads,
@@ -119,6 +122,14 @@ class RSDKv2PS1App final : public psyqo::Application {
 
         m_cdrom.resetBlocking(gpu());
         g_ps1CDRom = &m_cdrom;
+        // Pads: psyqo::AdvancedPad polls SIO0 itself from psyqo's frame loop. Not SimplePad:
+        // the BIOS pad driver (InitPAD/StartPAD) reads both pads inside the vblank IRQ with long
+        // busy-waits, and with that in the BIOS IRQ chain psyqo's blocking CD reads aborted
+        // ("CDRomDevice::irq() called with no action" / "invoked with unknown cause": the CD
+        // IRQ was dispatched while psyqo polled it with the CD IRQ masked). Fast = both ports
+        // every vsync (pad 1 at 60 Hz).
+        m_pad.initialize(psyqo::AdvancedPad::PollingMode::Fast);
+        g_ps1Pad = &m_pad;
 
 #if PS1_VIDEO_TEST
         PS1VideoSelfTestInit();

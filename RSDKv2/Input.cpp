@@ -29,6 +29,14 @@ int lastMouseY     = 0;
 std::vector<SDL_GameController *> controllers;
 #endif
 
+#if RETRO_PLATFORM == RETRO_PS1
+#include <psyqo/advancedpad.hh>
+extern psyqo::AdvancedPad *g_ps1Pad; // main.cpp (initialized in start())
+volatile uint16_t g_ps1PadTestMask  = 0; // GDB-injected input, bit = INPUT_* index (test harness)
+volatile uint16_t g_ps1PadButtons   = 0; // last input mask (bit = INPUT_* index)
+volatile uint32_t g_ps1PadConnected = 0; // pad 1 seen by the BIOS driver
+#endif
+
 #if RETRO_USING_SDL1
 byte keyState[SDLK_LAST];
 
@@ -342,6 +350,33 @@ void ReadInputDevice() {
     if (!flag && inputType == 1) {
         inputDevice[INPUT_ANY].setReleased();
     }
+#elif RETRO_PLATFORM == RETRO_PS1
+    // psyqo::AdvancedPad (direct SIO0 polling every vsync, see main.cpp), port 1 pad. Same
+    // mapping as the PC controller defaults (Userdata.cpp: A = south, B = east, C = west) and
+    // the same held / pressed / INPUT_ANY handling as the SDL2 branch above.
+    using Pad = psyqo::AdvancedPad;
+    static const Pad::Button map[INPUT_ANY] = { Pad::Up,    Pad::Down,   Pad::Left,   Pad::Right,
+                                                Pad::Cross, Pad::Circle, Pad::Square, Pad::Start };
+    uint16_t held  = g_ps1PadTestMask;
+    bool connected = g_ps1Pad && g_ps1Pad->isPadConnected(Pad::Pad::Pad1a);
+    if (connected) {
+        for (int i = 0; i < INPUT_ANY; i++)
+            if (g_ps1Pad->isButtonPressed(Pad::Pad::Pad1a, map[i]))
+                held |= 1 << i;
+    }
+    g_ps1PadConnected = connected;
+    g_ps1PadButtons   = held;
+    for (int i = 0; i < INPUT_ANY; i++) {
+        if (held & (1 << i)) {
+            inputDevice[i].setHeld();
+            if (!inputDevice[INPUT_ANY].hold)
+                inputDevice[INPUT_ANY].setHeld();
+        } else if (inputDevice[i].hold) {
+            inputDevice[i].setReleased();
+        }
+    }
+    if (!held)
+        inputDevice[INPUT_ANY].setReleased();
 #endif
 }
 #endif

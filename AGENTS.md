@@ -13,6 +13,8 @@ RSDKv2-Decompilation (Retro Engine v2, Sonic Nexus 2008) ported to the PS1 with
 - `RSDKv2/main.cpp` switches: `PS1_VIDEO_TEST` (FMV self-test),
   `PS1_TILE_TEST`, `PS1_SKIP_SPRITES`. Default build boots naturally (NIntro);
   `make BOOT=SSZ` (after `touch RSDKv2/main.cpp`) forces SSZ Act 1 for the harness.
+  Pad 1 (psyqo `AdvancedPad`) drives the game; tests inject input with GDB
+  (`g_ps1PadTestMask`) or through the real pad path (`tools/pad.lua`, see `../docs/21` §6b).
 - `../nugget` is plain upstream; the port must not depend on nugget changes (CD streaming
   lives in `ps1/cdrom_stream.*`, the make-rule fix is in our `Makefile`).
 - Current state + maps: `../docs/20-rsdkv2-ps1-port-state.md`. Open problems:
@@ -71,6 +73,9 @@ timeout 60 /Applications/PCSX-Redux.app/Contents/MacOS/PCSX-Redux -run -fastboot
 - **Per-frame drawing is DMA-chained** (`ps1/gpu_chain.hh`): no `sendPrimitive`/`clear`/
   `uploadToVRAM` in the frame path; chained fragments ≤ 14 words; immediate uploads call
   `PS1GpuImmediate()` first. `uploadToVRAM` widths must be even (psyqo aborts).
+- **Pads = `psyqo::AdvancedPad`**, never `SimplePad` (the BIOS pad driver breaks psyqo's
+  blocking CD reads, `../docs/26` F14). Stage-change state (tile set, atlas, sprite surfaces)
+  must be reset per stage: test the menu flow, not only `BOOT=SSZ`.
 - **One CD action at a time**: stop the FMV (`PS1StopVideo`) before any file read; stage
   loads already do.
 - Verify with `tools/run_test.sh` (60 fps = `PERF last=1`, `CHAIN overflow=0`) and
