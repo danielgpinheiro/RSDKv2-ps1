@@ -207,6 +207,17 @@ int AddGraphicsFile(const char *filePath) {
 
     StrCopy(sheetPath, "Data/Sprites/");
     StrAdd(sheetPath, filePath);
+#if RETRO_PLATFORM == RETRO_PS1
+    // Sprites are pre-converted to .gfx at build time (no LZW decode on PS1): X.gif -> X.gfx.
+    // Done before the lookup below so an already-loaded sheet is found under its .gfx name.
+    {
+        int sl = StrLength(sheetPath);
+        if (sl >= 4 && sheetPath[sl - 4] == '.' && sheetPath[sl - 3] == 'g' && sheetPath[sl - 2] == 'i' && sheetPath[sl - 1] == 'f') {
+            sheetPath[sl - 2] = 'f';
+            sheetPath[sl - 1] = 'x';
+        }
+    }
+#endif
     int sheetID = 0;
     while (StrLength(GfxSurface[sheetID].fileName) > 0) {
         if (StrComp(GfxSurface[sheetID].fileName, sheetPath))
@@ -226,16 +237,6 @@ int AddGraphicsFile(const char *filePath) {
         GfxSurface[sheetID].width  = 0;
         GfxSurface[sheetID].height = 0;
         return sheetID;
-    }
-#endif
-#if RETRO_PLATFORM == RETRO_PS1
-    // Sprites are pre-converted to .gfx at build time (no LZW decode on PS1).
-    {
-        int sl = StrLength(sheetPath);
-        if (sl >= 4 && sheetPath[sl - 4] == '.' && sheetPath[sl - 3] == 'g' && sheetPath[sl - 2] == 'i' && sheetPath[sl - 1] == 'f') {
-            sheetPath[sl - 1] = 'x';
-            fileExtension      = 'x';
-        }
     }
 #endif
     switch (fileExtension) {
@@ -263,7 +264,13 @@ void RemoveGraphicsFile(const char *filePath, int sheetID) {
         StrCopy(GfxSurface[sheetID].fileName, "");
         int dataPosStart = GfxSurface[sheetID].dataPosition;
         int dataPosEnd   = GfxSurface[sheetID].dataPosition + GfxSurface[sheetID].height * GfxSurface[sheetID].width;
+#if RETRO_PLATFORM == RETRO_PS1
+        // PC compacts a 2 MB buffer (0x200000); PS1's GraphicData is GFXDATA_MAX, so only move
+        // the bytes in use (the PC literal wrote far past the array and trashed RAM).
+        for (int i = GfxDataPosition - dataPosEnd; i > 0; --i) GraphicData[dataPosStart++] = GraphicData[dataPosEnd++];
+#else
         for (int i = 0x200000 - dataPosEnd; i > 0; --i) GraphicData[dataPosStart++] = GraphicData[dataPosEnd++];
+#endif
         GfxDataPosition -= GfxSurface[sheetID].height * GfxSurface[sheetID].width;
         for (int i = 0; i < SURFACE_MAX; ++i) {
             if (GfxSurface[i].dataPosition > GfxSurface[sheetID].dataPosition)
@@ -389,11 +396,17 @@ int LoadGIFFile(const char *filePath, byte sheetID) {
     }
     return false;
 }
+#if RETRO_PLATFORM == RETRO_PS1
+volatile uint32_t g_ps1SpriteRefused = 0; // GDB-visible: sheets refused by LoadGFXFile
+#endif
 int LoadGFXFile(const char *filePath, byte sheetID) {
     FileInfo info;
     if (LoadFile(filePath, &info)) {
         GFXSurface *surface = &GfxSurface[sheetID];
         StrCopy(surface->fileName, filePath);
+#if RETRO_PLATFORM == RETRO_PS1
+        surface->vramPageX = -1; // a reused sheet slot must not inherit the old VRAM page
+#endif
 
         byte fileBuffer = 0;
         FileRead(&fileBuffer, 1);
@@ -405,6 +418,22 @@ int LoadGFXFile(const char *filePath, byte sheetID) {
         FileRead(&fileBuffer, 1);
         surface->height += fileBuffer;
 
+#if RETRO_PLATFORM == RETRO_PS1
+        // Refuse sheets the PS1 can't hold instead of overflowing GraphicData (which wraps to
+        // 0 and overwrites loaded sheets) or keeping pixels the GPU path can never draw
+        // (PS1UploadSpriteSheet: <= 512x256). The name stays set so later loads of the same
+        // sheet hit the lookup; a 0x0 surface is never drawn. Real fix: sprite pipeline phase.
+        if (surface->width > 512 || surface->height > 256
+            || GfxDataPosition + surface->width * surface->height > GFXDATA_MAX) {
+            ramsyscall_printf("[sprite] REFUSED '%s' %dx%d gfxpos=%d\n", filePath, surface->width, surface->height,
+                              GfxDataPosition);
+            ++g_ps1SpriteRefused;
+            surface->width  = 0;
+            surface->height = 0;
+            CloseFile();
+            return false;
+        }
+#endif
         byte clr[3];
         for (int i = 0; i < 0xFF; ++i) FileRead(&clr, 3); // Palette
 

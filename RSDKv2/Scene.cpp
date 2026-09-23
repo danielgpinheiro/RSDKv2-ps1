@@ -232,6 +232,9 @@ void LoadStageFiles(void) {
         LoadPalette("Data/Palettes/MasterPalette.act", 0, 256);
         ClearScriptData();
         for (int i = SPRITESHEETS_MAX; i > 0; i--) RemoveGraphicsFile((char *)"", i - 1);
+#if RETRO_PLATFORM == RETRO_PS1
+        PS1ResetSpriteSurfaces(); // free all sprite VRAM slots; kept sheets (player) re-upload lazily
+#endif
 
 #if RETRO_PLATFORM == RETRO_PS1
         // Precompiled bytecode (golden rule: no .txt parsing on the console). Produced at

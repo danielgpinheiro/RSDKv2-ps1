@@ -62,6 +62,7 @@ void FlipScreen();
 void PS1UploadPalette();
 void PS1UploadSpriteSheet(int sheetID);
 void PS1ResetSpriteVRAM();
+void PS1ResetSpriteSurfaces(); // stage change: every sheet re-uploads lazily into fresh slots
 void PS1TileSelfTest();
 #endif
 void ReleaseRenderDevice();
@@ -75,8 +76,7 @@ inline void ClearGraphicsData() {
     MEM_ZERO(GfxSurface);
 #endif
 #if RETRO_PLATFORM == RETRO_PS1
-    for (int i = 0; i < SURFACE_MAX; ++i) GfxSurface[i].vramPageX = -1;
-    PS1ResetSpriteVRAM();
+    PS1ResetSpriteSurfaces();
 #endif
 }
 

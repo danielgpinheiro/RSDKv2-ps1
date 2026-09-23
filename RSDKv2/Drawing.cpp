@@ -47,6 +47,10 @@ static const int ps1PageSlotY[4] = { 0, 0, 1, 1 };
 static bool ps1TileSetUploaded = false;
 
 static bool PS1AllocPages(int pagesX, int *outX, int *outY) {
+    // Slots are (5,0) (7,0) (5,1) (7,1): a 2-wide sheet must start at an even slot, or its
+    // second half would land on pageX 9 (tile pages).
+    if (pagesX == 2 && (ps1PageSlotIdx & 1))
+        ++ps1PageSlotIdx;
     if (pagesX < 1 || pagesX > 2 || ps1PageSlotIdx + pagesX > 4)
         return false;
     *outX = ps1PageSlotX[ps1PageSlotIdx];
@@ -75,6 +79,14 @@ void PS1UploadPalette() {
 void PS1ResetSpriteVRAM() {
     ps1PageSlotIdx = 0;
     PS1ChainInvalidateTPage();
+}
+
+void PS1ResetSpriteSurfaces() {
+    // Sheets keep their pixels in GraphicData, so any sheet still in use simply re-uploads
+    // into a fresh slot on its next draw.
+    for (int i = 0; i < SURFACE_MAX; ++i)
+        GfxSurface[i].vramPageX = -1;
+    PS1ResetSpriteVRAM();
 }
 
 // Upload the stage tile set: 16x16Tiles.vram holds 4 pages already packed in texture-page
@@ -198,7 +210,9 @@ void PS1UploadSpriteSheet(int sheetID) {
 
     // Pack 8-bit indices into 16-bit halfwords (2 texels per halfword) and upload row by row.
     const byte *src = &GraphicData[s->dataPosition];
-    int halfW      = (s->width + 1) / 2;
+    // Uploads must be an even number of halfwords (psyqo aborts otherwise): pad the row.
+    // e.g. NexusTitle/Island.gif is 246 px = 123 halfwords -> 124.
+    int halfW      = (((s->width + 1) / 2) + 1) & ~1;
     int vramHalfX  = px * 64; // pageX * 64 halfwords
     int vramY      = py * 256;
     alignas(4) static uint16_t row[256];
@@ -206,7 +220,7 @@ void PS1UploadSpriteSheet(int sheetID) {
     for (int y = 0; y < s->height; ++y) {
         for (int x = 0; x < halfW; ++x) {
             int i   = y * s->width + x * 2;
-            byte lo = src[i];
+            byte lo = (x * 2 < s->width) ? src[i] : 0; // padding halfword: transparent
             byte hi = (x * 2 + 1 < s->width) ? src[i + 1] : 0;
             row[x]  = (uint16_t)(lo | (hi << 8));
         }

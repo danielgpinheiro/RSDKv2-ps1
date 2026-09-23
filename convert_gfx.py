@@ -14,6 +14,9 @@ Output: a new Data.bin with every .gif sprite (and the 16x16Tiles.gif tile
 strip) replaced by a .gfx file of the same name, plus the original name kept
 as a 0-size .gif stub? No -- we just ADD .gfx siblings and remap in the loader.
 This script only EMITS .gfx files into build/gfx-out/ for inspection + repack.
+
+`convert_gfx.py --loose build/iso/Data` instead writes a .gfx next to every sprite .gif
+in the loose tree that has none; index 0xFF is remapped to the nearest palette colour.
 """
 import struct, io, sys
 from PIL import Image
@@ -87,10 +90,35 @@ def rle_encode(pixels):
     return bytes(out)
 
 
-def gif_to_gfx(raw):
-    im = Image.open(io.BytesIO(raw)).convert('P')
+def remap_ff(im, px):
+    """Index 0xFF is the .gfx RLE escape. Replace it with the nearest other palette entry
+    (never 0 = transparent). Returns (pixels, (target, rgb_from, rgb_to, count)) or (px, None)."""
+    n = px.count(0xFF)
+    if n == 0:
+        return px, None
+    pal = im.getpalette() or []
+    pal = pal + [0] * (768 - len(pal))
+    src = pal[765:768]
+    best, bestd = None, None
+    for i in range(1, 255):
+        c = pal[i * 3:i * 3 + 3]
+        d = sum((a - b) ** 2 for a, b in zip(c, src))
+        if bestd is None or d < bestd:
+            best, bestd = i, d
+    return [best if v == 0xFF else v for v in px], (best, src, pal[best * 3:best * 3 + 3], n)
+
+
+def gif_to_gfx(raw, allow_remap=False):
+    im = Image.open(io.BytesIO(raw))
+    if im.mode != 'P':
+        im = im.convert('P')
     w, h = im.size
     px = list(im.getdata())
+    if allow_remap:
+        px, remap = remap_ff(im, px)
+        if remap:
+            t, a, b, n = remap
+            print(f'    remap 0xFF {tuple(a)} -> {t} {tuple(b)} ({n} px)')
     assert 0xFF not in px, "0xFF pixel present — RLE escape collision"
     out = bytearray()
     out += struct.pack('>H', w)  # width BE
@@ -100,7 +128,46 @@ def gif_to_gfx(raw):
     return bytes(out)
 
 
+def roundtrip_ok(gfx, w, h):
+    body = gfx[4 + 255 * 3:]
+    count, p = 0, 0
+    while p < len(body):
+        b = body[p]; p += 1
+        if b == 0xFF:
+            b1 = body[p]; p += 1
+            if b1 == 0xFF:
+                break
+            count += body[p]; p += 1
+        else:
+            count += 1
+    return count == w * h
+
+
+def convert_loose(root):
+    """Write a .gfx sibling for every sprite .gif in a loose Data/ tree that has none
+    (tile strips are handled by convert_tiles.py)."""
+    import os
+    for dirpath, _, files in os.walk(root):
+        for fn in sorted(files):
+            if not fn.lower().endswith('.gif') or fn == '16x16Tiles.gif':
+                continue
+            src = os.path.join(dirpath, fn)
+            dst = src[:-4] + '.gfx'
+            if os.path.exists(dst):
+                continue
+            print(f'  {src}')
+            raw = open(src, 'rb').read()
+            gfx = gif_to_gfx(raw, allow_remap=True)
+            w, h = struct.unpack('>HH', gfx[0:4])
+            assert roundtrip_ok(gfx, w, h), dst
+            open(dst, 'wb').write(gfx)
+            print(f'    {w}x{h} gif={len(raw)}B -> gfx={len(gfx)}B')
+
+
 def main():
+    if len(sys.argv) == 3 and sys.argv[1] == '--loose':
+        convert_loose(sys.argv[2])
+        return
     data = open(DATA, 'rb').read()
     headerSize, dirs = parse_vfs(data)
     import os
