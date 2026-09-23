@@ -106,13 +106,13 @@ void PS1GpuImmediate() {
         s_gpu->waitChainIdle();
 }
 
-void PS1ChainClear() {
+void PS1ChainClear(uint8_t r, uint8_t g, uint8_t b) {
     flushBatch();
     auto *frag = allocRaw<psyqo::Fragments::SimpleFragment<psyqo::Prim::FastFill>>();
     if (!frag)
         return;
     new (frag) psyqo::Fragments::SimpleFragment<psyqo::Prim::FastFill>();
-    s_gpu->getNextClear(frag->primitive, psyqo::Color{{0, 0, 0}});
+    s_gpu->getNextClear(frag->primitive, psyqo::Color{{.r = r, .g = g, .b = b}});
     s_gpu->chain(*frag);
 }
 
@@ -161,6 +161,8 @@ void PS1ChainSprite16(const psyqo::Prim::Sprite16x16 &s) {
 }
 
 void PS1ChainSprite(const psyqo::Prim::Sprite &s) { chainSimple(s); }
+
+void PS1ChainRect(const psyqo::Prim::Rectangle &r) { chainSimple(r); }
 
 void PS1ChainQuad(const psyqo::Prim::TexturedQuad &q) {
     chainSimple(q);

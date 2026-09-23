@@ -19,6 +19,10 @@ Colour TilePaletteF[PALETTE_SIZE];
 Colour TilePaletteWF[PALETTE_SIZE];
 
 int PaletteMode = 0;
+#if RETRO_PLATFORM == RETRO_PS1
+byte ps1FadeR = 0, ps1FadeG = 0, ps1FadeB = 0;
+int ps1FadeA = 0;
+#endif
 
 void LoadPalette(const char *filePath, int startIndex, int endIndex) {
     FileInfo info;
@@ -39,6 +43,16 @@ void SetFade(byte r, byte g, byte b, ushort a, int start, int end) {
     PaletteMode = 1;
     if (a > 0xFF)
         a = 0xFF;
+#if RETRO_PLATFORM == RETRO_PS1
+    // Only a fade that covers entry 0 describes the empty screen (PC: ClearScreen(0) + faded
+    // entry 0). e.g. NexusTitle/FadeUp fades 0-111 from black and 112-255 from white.
+    if (start == 0) {
+        ps1FadeR = r;
+        ps1FadeG = g;
+        ps1FadeB = b;
+        ps1FadeA = a;
+    }
+#endif
     if (end <= 0xFF)
         ++end;
     for (int i = start; i < end; ++i) {

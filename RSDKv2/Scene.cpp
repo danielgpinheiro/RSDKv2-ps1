@@ -216,6 +216,9 @@ void ProcessStage(void) {
 }
 
 void LoadStageFiles(void) {
+#if RETRO_PLATFORM == RETRO_PS1
+    PS1StopVideo(); // one CD action at a time: the FMV stream must end before any file read
+#endif
     StopAllSfx();
     FileInfo infoStore;
     FileInfo info;

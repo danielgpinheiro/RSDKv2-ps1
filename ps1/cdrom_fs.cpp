@@ -17,7 +17,10 @@
 #include <psyqo/gpu.hh>
 #include "common/syscalls/syscalls.h"
 
+#include "video.hh"
+
 extern psyqo::CDRomDevice *g_ps1CDRom;
+volatile uint32_t g_ps1VideoForcedClose = 0; // file reads that had to stop an open FMV stream
 extern psyqo::GPU         *g_ps1GPU;
 
 #define ISO_SECTOR 2048
@@ -123,6 +126,13 @@ FILE *fopen(const char *path, const char *mode) {
     uint32_t lba, size;
     if (!g_ps1CDRom || !g_ps1GPU)
         return nullptr;
+    if (PS1VideoIsOpen()) {
+        // One CD action at a time: a file read while the FMV streams would break both.
+        // Callers stop the video first (PS1StopVideo); this is the safety net.
+        ramsyscall_printf("[cdrom_fs] fopen('%s') while a video streams: closing the video\n", path);
+        g_ps1VideoForcedClose = g_ps1VideoForcedClose + 1;
+        PS1VideoClose();
+    }
     if (!findFile(path, &lba, &size))
         return nullptr;
     FILE *f = (FILE *)malloc(sizeof(FILE));

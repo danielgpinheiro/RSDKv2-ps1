@@ -262,6 +262,13 @@ void RemoveGraphicsFile(const char *filePath, int sheetID) {
 
     if (sheetID >= 0 && StrLength(GfxSurface[sheetID].fileName)) {
         StrCopy(GfxSurface[sheetID].fileName, "");
+#if RETRO_PLATFORM == RETRO_PS1
+        if (GfxSurface[sheetID].vramDirect15) { // FMV surface: pixels live only in VRAM
+            GfxSurface[sheetID].vramDirect15 = false;
+            GfxSurface[sheetID].width = GfxSurface[sheetID].height = 0;
+            return;
+        }
+#endif
         int dataPosStart = GfxSurface[sheetID].dataPosition;
         int dataPosEnd   = GfxSurface[sheetID].dataPosition + GfxSurface[sheetID].height * GfxSurface[sheetID].width;
 #if RETRO_PLATFORM == RETRO_PS1
@@ -405,7 +412,8 @@ int LoadGFXFile(const char *filePath, byte sheetID) {
         GFXSurface *surface = &GfxSurface[sheetID];
         StrCopy(surface->fileName, filePath);
 #if RETRO_PLATFORM == RETRO_PS1
-        surface->vramPageX = -1; // a reused sheet slot must not inherit the old VRAM page
+        surface->vramPageX    = -1; // a reused sheet slot must not inherit the old VRAM page
+        surface->vramDirect15 = false;
 #endif
 
         byte fileBuffer = 0;
@@ -467,6 +475,51 @@ int LoadGFXFile(const char *filePath, byte sheetID) {
     }
     return false;
 }
+#if RETRO_PLATFORM == RETRO_PS1
+#include "../ps1/video.hh"
+// PS1: Videos/X.rsv is shipped as Videos/X.str (MDEC, built by tools/dump_y4m.py + psxavenc).
+// The surface is a 15-bit texture page written straight to VRAM; no GraphicData is used.
+int LoadRSVFile(const char *filePath, byte sheetID) {
+    static bool mdecReady = false;
+    char strPath[0x100];
+    StrCopy(strPath, filePath);
+    int sl = StrLength(strPath);
+    if (sl >= 4 && strPath[sl - 4] == '.') {
+        strPath[sl - 3] = 's';
+        strPath[sl - 2] = 't';
+        strPath[sl - 1] = 'r';
+    }
+    PS1StopVideo();
+    if (!mdecReady) {
+        PS1VideoInit();
+        mdecReady = true;
+    }
+    GFXSurface *surface = &GfxSurface[sheetID];
+    if (!PS1VideoOpen(strPath)) {
+        ramsyscall_printf("[video] can't open '%s' (missing file or heap)\n", strPath);
+        return false;
+    }
+    if (!PS1AllocDirectSurface(sheetID)) {
+        ramsyscall_printf("[video] no VRAM page for '%s'\n", strPath);
+        PS1VideoClose();
+        return false;
+    }
+    StrCopy(surface->fileName, filePath);
+    VideoSurface          = sheetID;
+    CurrentVideoFrame     = 0;
+    VideoFrameCount       = PS1VideoFrameCount();
+    VideoWidth            = PS1VideoWidth();
+    VideoHeight           = PS1VideoHeight();
+    VideoFilePos          = 0;
+    VideoPlaying          = true;
+    surface->width        = VideoWidth;
+    surface->height       = VideoHeight;
+    surface->dataPosition = GfxDataPosition; // nothing reserved
+    ramsyscall_printf("[video] '%s' %d frames %dx%d page=%d,%d\n", strPath, VideoFrameCount, VideoWidth, VideoHeight,
+                      surface->vramPageX, surface->vramPageY);
+    return true;
+}
+#else
 int LoadRSVFile(const char *filePath, byte sheetID) {
     FileInfo info;
     if (LoadFile(filePath, &info)) {
@@ -509,3 +562,4 @@ int LoadRSVFile(const char *filePath, byte sheetID) {
     }
     return false;
 }
+#endif

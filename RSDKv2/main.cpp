@@ -22,6 +22,12 @@ volatile uint32_t g_ps1PerfLastFrameVsyncs = 0; // vsyncs taken by the last fram
 volatile uint32_t g_ps1HeapTotal           = 0; // bytes between bss end and the stack
 volatile uint32_t g_ps1HeapHeadroom        = 0; // bytes never reached by the heap high-water mark
 static uint32_t   s_ps1PerfLastCount       = 0;
+volatile uint32_t g_ps1PerfVideoFrames     = 0; // game frames run while a video was open
+volatile uint32_t g_ps1PerfVideoMaxVsyncs  = 0; // slowest of those (1 = 60 fps)
+volatile uint32_t g_ps1PerfVideoSlow       = 0; // those that took more than 1 vsync
+volatile uint32_t g_ps1HeapVideoHeadroom   = 0; // heap headroom right after the last video frame
+volatile uint32_t g_ps1PerfVideoMaxHbl     = 0; // longest frame() CPU time while a video plays (hblanks, 262 = 1 frame)
+static bool       s_ps1PerfVideoTick       = false;
 
 __attribute__((noinline)) static void PS1PerfTick(psyqo::GPU &gpu) {
     uint32_t now = gpu.getFrameCount();
@@ -29,6 +35,13 @@ __attribute__((noinline)) static void PS1PerfTick(psyqo::GPU &gpu) {
         uint32_t d = now - s_ps1PerfLastCount;
         g_ps1PerfVsyncs += d;
         g_ps1PerfLastFrameVsyncs = d;
+        if (s_ps1PerfVideoTick && PS1VideoIsOpen()) {
+            g_ps1PerfVideoFrames++;
+            if (d > g_ps1PerfVideoMaxVsyncs)
+                g_ps1PerfVideoMaxVsyncs = d;
+            if (d > 1)
+                g_ps1PerfVideoSlow++;
+        }
     }
     s_ps1PerfLastCount = now;
     g_ps1PerfFrames++;
@@ -39,6 +52,8 @@ __attribute__((noinline)) static void PS1PerfTick(psyqo::GPU &gpu) {
         top = hs;
     g_ps1HeapTotal    = ss - hs;
     g_ps1HeapHeadroom = ss - top;
+    if (s_ps1PerfVideoTick)
+        g_ps1HeapVideoHeadroom = g_ps1HeapHeadroom;
 }
 
 psyqo::GPU         *g_ps1GPU   = nullptr;
@@ -148,9 +163,20 @@ class RSDKv2PS1App final : public psyqo::Application {
         PS1PerfTick(gpu());
         return;
 #endif
+        // FMV: decode + upload the next video frame (immediate VRAM upload, so before the
+        // chain starts). Counted only when the video was already open (not its load frame).
+        s_ps1PerfVideoTick = PS1VideoIsOpen();
+        uint32_t t0        = PS1Hblanks();
+        if (s_ps1PerfVideoTick)
+            PS1UpdateVideoTexture();
         PS1ChainBegin(gpu()); // all per-frame drawing is DMA-chained (ps1/gpu_chain.hh)
         Engine.RunFrame();
         PS1ChainEnd();        // psyqo sends the chain after frame() returns
+        if (s_ps1PerfVideoTick && PS1VideoIsOpen()) {
+            uint32_t cpu = PS1HblanksSince(t0);
+            if (cpu > g_ps1PerfVideoMaxHbl)
+                g_ps1PerfVideoMaxHbl = cpu;
+        }
         PS1PerfTick(gpu());
     }
 };

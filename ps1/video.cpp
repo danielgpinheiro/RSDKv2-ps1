@@ -15,6 +15,7 @@
 #include <string.h>
 
 #include <psyqo/alloc.h>
+#include "common/hardware/counters.h"
 
 #define ISO_SECTOR            2048
 #define STR_SECTORS_PER_FRAME 10
@@ -33,6 +34,13 @@ volatile uint32_t g_ps1VideoFrames = 0; // frames decoded
 volatile uint32_t g_ps1VideoResync = 0; // sectors skipped because their STR header didn't match
 volatile uint32_t g_ps1VideoRleOverflow = 0; // frames skipped: RLE bigger than the buffer
 volatile uint32_t g_ps1VideoHeapBytes   = 0; // bytes currently allocated for FMV playback
+// Decode cost of the last frame, in hblanks (root counter 1, free-running under psyqo:
+// 63.6 us each, ~262 per NTSC frame).
+volatile uint32_t g_ps1VideoVlcHbl  = 0; // Huffman (VLC) decode on the CPU
+volatile uint32_t g_ps1VideoMdecHbl = 0; // MDEC in/out DMA + wait
+
+uint32_t PS1Hblanks() { return COUNTERS[1].value; }
+uint32_t PS1HblanksSince(uint32_t t0) { return (PS1Hblanks() - t0) & 0xffff; }
 
 static FILE *s_str = nullptr;
 
@@ -49,6 +57,13 @@ static int s_width = 256;
 static int s_height = 160;
 static int s_frameCount = 0;
 static int s_nextFrame  = 1; // STR frame numbers are 1-based
+static int s_requested  = 0; // frames asked for by the game, not decoded yet
+// Game-side decode pipeline state (see PS1VideoService).
+enum { STAGE_EMPTY, STAGE_VLC, STAGE_MDEC };
+static int      s_stage  = STAGE_EMPTY; // state of s_bs/s_rle (the frame being decoded)
+static bool     s_pixReady = false;     // s_video holds a decoded frame not yet handed over
+static uint32_t s_rlePos = 0; // RLE data words written so far (s_rle[1..s_rlePos])
+static uint32_t s_vlcAcc = 0; // hblanks spent on this frame's VLC so far
 
 struct StrSectorHeader {
     uint16_t magic;
@@ -109,15 +124,20 @@ bool PS1VideoOpen(const char *path) {
     uint32_t sectors = s_str->size / ISO_SECTOR;
     s_frameCount = (int)(sectors / STR_SECTORS_PER_FRAME);
     s_nextFrame  = 1;
+    s_requested  = 0;
+    s_stage      = STAGE_EMPTY;
+    s_pixReady   = false;
+    s_rlePos     = 0;
     // Geometry is fixed by the encoder (psxavenc -s 256x160).
     s_width  = 256;
     s_height = 160;
     return PS1StreamOpen(s_str->lba, sectors, s_ring, STR_RING_SECTORS);
 }
 
-int PS1VideoNextFrame() {
-    if (!s_str)
-        return -1;
+// Takes the next complete frame (10 sectors, headers checked) out of the ring into s_bs.
+// 1 = s_bs holds frame s_nextFrame, 0 = not yet (still reading / bad sector / skipped),
+// -1 = end of stream or drive error.
+static int fetchFrame() {
     PS1StreamPump();
     if (PS1StreamError())
         return -1;
@@ -159,19 +179,35 @@ int PS1VideoNextFrame() {
         s_nextFrame++;
         return 0;
     }
+    return 1;
+}
 
-    // Huffman decode -> MDEC RLE buffer (s_rle[0] = MDEC(1) command word).
-    if (DecDCTvlcStart2(&s_vlcCtx, s_rle, 0, (const uint32_t *)s_bs) < 0)
-        return -1;
-
-    // Hardware decode: RLE + IDCT + YUV->RGB. Decoding is synchronous, so a single
-    // pixel buffer suffices (the caller uploads it after this returns).
-    DecDCTin(s_rle, DECDCT_MODE_16BPP);
+// Hardware decode of s_rle: RLE + IDCT + YUV->RGB into s_video. Synchronous, so a single
+// pixel buffer suffices (the caller uploads it before the next decode).
+static void mdecRun() {
+    uint32_t t0 = PS1Hblanks();
+    // Bit 15 (STP) set on every texel: MDEC's pure black would otherwise be 0x0000 =
+    // transparent, and the additive fade overlay would then hit the background twice.
+    DecDCTin(s_rle, DECDCT_MODE_16BPP_BIT15);
     DecDCTout((uint32_t *)s_video, (size_t)(s_width * s_height / 2));
     DecDCToutSync(0);
-
+    g_ps1VideoMdecHbl = PS1HblanksSince(t0);
     s_nextFrame++;
     g_ps1VideoFrames = g_ps1VideoFrames + 1;
+}
+
+int PS1VideoNextFrame() {
+    if (!s_str)
+        return -1;
+    int r = fetchFrame();
+    if (r <= 0)
+        return r;
+    // Huffman decode -> MDEC RLE buffer (s_rle[0] = MDEC(1) command word), in one go.
+    uint32_t t0 = PS1Hblanks();
+    if (DecDCTvlcStart2(&s_vlcCtx, s_rle, 0, (const uint32_t *)s_bs) < 0)
+        return -1;
+    g_ps1VideoVlcHbl = PS1HblanksSince(t0);
+    mdecRun();
     return 1;
 }
 
@@ -182,6 +218,145 @@ void PS1VideoClose() {
         s_str = nullptr;
     }
     freeBuffers();
+}
+
+bool PS1VideoIsOpen() { return s_str != nullptr; }
+int  PS1VideoFrameCount() { return s_frameCount; }
+
+void PS1VideoRequestFrame() {
+    // Capped: a stall can't make later frames flash by to "catch up"; the video just runs
+    // a frame or two behind the script (the intro has 74 requests of slack after its end).
+    if (s_str && s_requested < 2)
+        s_requested++;
+}
+
+// ---- Game-side pipeline -------------------------------------------------------------
+// One frame's VLC (~285 hblanks = 18 ms on the CPU, up to ~700 on busy frames) + MDEC (~77)
+// is longer than a game frame, so decoding runs ahead in slices of at most WORK_BUDGET_HBL
+// per game frame: fetch -> VLC in chunks -> MDEC into s_video -> handed over when the game
+// asks (NextVideoFrame). The VLC of frame N+1 proceeds while frame N waits in s_video; only
+// the MDEC (which overwrites s_video) waits for the handover.
+
+// Measured in the intro: game logic + chain building ~55-75 hblanks per frame, so the
+// video's share of a game frame (upload + decode, counted from PS1UpdateVideoTexture's
+// start) stops starting new slices after 170 and never lets MDEC run past 190 (262 = one
+// frame; heaviest measured intro frame at these values: see docs/20).
+#define VLC_CHUNK_WORDS 512 // ~11-25 hblanks each
+#define WORK_BUDGET_HBL 170
+#define MDEC_LIMIT_HBL  190
+#define MDEC_EST_HBL    80
+
+volatile uint32_t g_ps1VideoWorkMaxHbl = 0; // longest decode slice spent in one game frame
+volatile uint32_t g_ps1VideoLate       = 0; // game frames where a requested frame wasn't decoded yet
+volatile uint32_t g_ps1VideoDropped    = 0; // frames skipped (not decoded) so the stream never pauses
+volatile uint32_t g_ps1VideoFetchMaxHbl = 0; // slowest fetchFrame (resync + 20 KB copy + pump)
+
+// One VLC chunk appended to s_rle. Every chunk starts with its own MDEC(1) header word; it
+// is written over the previous chunk's last data word (saved + restored), so the data stays
+// contiguous and a single header covering the whole frame is patched in at the end.
+// 0 = frame complete, 1 = more to do, -1 = bad bitstream.
+static int vlcChunk() {
+    uint32_t t0 = PS1Hblanks();
+    int r;
+    if (s_rlePos == 0) {
+        r = DecDCTvlcStart2(&s_vlcCtx, s_rle, VLC_CHUNK_WORDS + 1, (const uint32_t *)s_bs);
+        if (r >= 0)
+            s_rlePos = s_rle[0] & 0xffff;
+    } else {
+        uint32_t *at    = s_rle + s_rlePos;
+        uint32_t  saved = *at;
+        r               = DecDCTvlcContinue2(&s_vlcCtx, at, VLC_CHUNK_WORDS + 1);
+        uint32_t n      = *at & 0xffff;
+        *at             = saved;
+        if (r >= 0)
+            s_rlePos += n;
+    }
+    if (r == 0)
+        s_rle[0] = 0x38000000 | s_rlePos;
+    s_vlcAcc += PS1HblanksSince(t0);
+    return r;
+}
+
+// While the game is waiting for frames, the stream must never fill the ring: a paused
+// stream restarts with a seek (~200 ms without data) and at 2x the CD delivers exactly the
+// 15 fps the game asks for, so that time is never won back. When the decoder falls behind,
+// the oldest buffered frame is dropped instead (STR frames are all intra-coded). When the
+// game isn't asking (the intro's fade-in shows frame 1 for ~4 s), pausing is intended.
+#define RING_DROP_SECTORS (STR_RING_SECTORS - 4) // ~1.6 game frames of margin at 2.5 sectors/frame
+
+static void relieveRing() {
+    if (s_requested == 0)
+        return;
+    while (PS1StreamAvailable() >= RING_DROP_SECTORS) {
+        const StrSectorHeader *h = hdr(0);
+        if (h->magic == STR_MAGIC && h->sectorIndex == 0) {
+            PS1StreamConsume(STR_SECTORS_PER_FRAME); // fetchFrame's resync accepts the next one
+            g_ps1VideoDropped = g_ps1VideoDropped + 1;
+        } else {
+            PS1StreamConsume(1);
+            g_ps1VideoResync = g_ps1VideoResync + 1;
+        }
+    }
+}
+
+int PS1VideoService() {
+    if (!s_str)
+        return -1;
+    PS1StreamPump(); // keep reading ahead even between requests
+    relieveRing();
+    if (s_pixReady && s_requested > 0) {
+        s_requested--;
+        s_pixReady = false;
+        return 1; // the caller uploads s_video now, then calls PS1VideoDecode()
+    }
+    if (s_requested > 0)
+        g_ps1VideoLate = g_ps1VideoLate + 1; // the game is waiting for a frame
+    return 0;
+}
+
+int PS1VideoDecode(uint32_t t0) {
+    if (!s_str)
+        return -1;
+    while (PS1HblanksSince(t0) < WORK_BUDGET_HBL) {
+        if (s_stage == STAGE_EMPTY) {
+            uint32_t tf = PS1Hblanks();
+            int r       = fetchFrame();
+            tf          = PS1HblanksSince(tf);
+            if (tf > g_ps1VideoFetchMaxHbl)
+                g_ps1VideoFetchMaxHbl = tf;
+            if (r < 0) { // end of stream: report it once the game asks for a frame past it
+                if (s_pixReady || s_requested == 0)
+                    break;
+                return -1;
+            }
+            if (r == 0)
+                break; // sectors not here yet
+            s_rlePos = 0;
+            s_vlcAcc = 0;
+            s_stage  = STAGE_VLC;
+        } else if (s_stage == STAGE_VLC) {
+            int r = vlcChunk();
+            if (r < 0)
+                return -1;
+            if (r == 0) {
+                g_ps1VideoVlcHbl = s_vlcAcc;
+                s_stage          = STAGE_MDEC;
+            }
+        } else { // STAGE_MDEC
+            if (s_pixReady)
+                break; // s_video still holds a frame the game hasn't taken yet
+            if (PS1HblanksSince(t0) + MDEC_EST_HBL > MDEC_LIMIT_HBL)
+                break; // next game frame
+            mdecRun();
+            s_pixReady = true;
+            s_stage    = STAGE_EMPTY;
+        }
+    }
+    relieveRing();
+    uint32_t spent = PS1HblanksSince(t0);
+    if (spent > g_ps1VideoWorkMaxHbl)
+        g_ps1VideoWorkMaxHbl = spent;
+    return 0;
 }
 
 uint16_t *PS1VideoPixels() { return s_video; }

@@ -82,11 +82,45 @@ void PS1ResetSpriteVRAM() {
 }
 
 void PS1ResetSpriteSurfaces() {
-    // Sheets keep their pixels in GraphicData, so any sheet still in use simply re-uploads
-    // into a fresh slot on its next draw.
-    for (int i = 0; i < SURFACE_MAX; ++i)
-        GfxSurface[i].vramPageX = -1;
+    // Sheets keep their pixels in GraphicData (except 15-bit direct surfaces), so any sheet
+    // still in use simply re-uploads into a fresh slot on its next draw.
+    for (int i = 0; i < SURFACE_MAX; ++i) {
+        GfxSurface[i].vramPageX    = -1;
+        GfxSurface[i].vramDirect15 = false;
+    }
     PS1ResetSpriteVRAM();
+}
+
+// 15-bit (FMV) surfaces don't go through the CLUT, so a palette fade is re-created on the
+// GPU: modulate the texels by (255-a) and add fadeColour*a with an additive rectangle,
+// i.e. PC's (c*a + (255-a)*p) >> 8. Call after drawing the surface at (x, y, w, h).
+static uint8_t PS1DirectModulation() { return PaletteMode ? (uint8_t)((0x80 * (255 - ps1FadeA)) >> 8) : 0x80; }
+
+static void PS1DirectFadeOverlay(int x, int y, int w, int h) {
+    if (!PaletteMode || !ps1FadeA || !(ps1FadeR | ps1FadeG | ps1FadeB))
+        return;
+    psyqo::PrimPieces::TPageAttr attr; // untextured semi-trans takes its blend mode from the texpage
+    attr.set(psyqo::Prim::TPageAttr::SemiTrans::FullBackAndFullFront);
+    PS1ChainTPage(attr);
+    psyqo::Prim::Rectangle r(psyqo::Color{{.r = (uint8_t)((ps1FadeR * ps1FadeA) >> 8),
+                                           .g = (uint8_t)((ps1FadeG * ps1FadeA) >> 8),
+                                           .b = (uint8_t)((ps1FadeB * ps1FadeA) >> 8)}});
+    r.setSemiTrans();
+    r.position = psyqo::Vertex{{.x = (int16_t)x, .y = (int16_t)y}};
+    r.size     = psyqo::Vertex{{.w = (int16_t)w, .h = (int16_t)h}};
+    PS1ChainRect(r);
+}
+
+bool PS1AllocDirectSurface(int sheetID) {
+    // A 15-bit texture page is 256 halfwords wide = two 8-bit sprite slots.
+    GFXSurface *s = &GfxSurface[sheetID];
+    int px, py;
+    if (!PS1AllocPages(2, &px, &py))
+        return false;
+    s->vramPageX    = px;
+    s->vramPageY    = py;
+    s->vramDirect15 = true;
+    return true;
 }
 
 // Upload the stage tile set: 16x16Tiles.vram holds 4 pages already packed in texture-page
@@ -594,7 +628,12 @@ void DrawStageGfx() {
 #if RETRO_PLATFORM == RETRO_PS1
     if (g_ps1GPU) {
         PS1UploadTileSet();        // once per stage (immediate, waits for the in-flight chain)
-        PS1ChainClear();           // chained FastFill of the buffer this frame draws into
+        // Chained FastFill of the buffer this frame draws into. Under a fade the empty screen
+        // is the fade colour's share (PC: ClearScreen(0) + faded palette entry 0 = black).
+        if (PaletteMode)
+            PS1ChainClear((ps1FadeR * ps1FadeA) >> 8, (ps1FadeG * ps1FadeA) >> 8, (ps1FadeB * ps1FadeA) >> 8);
+        else
+            PS1ChainClear();
         PS1UploadPalette();        // chained CLUT upload (fade / palette cycling)
         PS1ChainInvalidateTPage();
     }
@@ -2014,6 +2053,23 @@ void DrawSprite(int XPos, int YPos, int width, int height, int sprX, int sprY, i
         GFXSurface *surface = &GfxSurface[sheetID];
         if (surface->vramPageX < 0 && surface->width > 0 && surface->height > 0)
             PS1UploadSpriteSheet(sheetID);
+        if (surface->vramDirect15) {
+            // 15-bit surface (FMV): one texture page, texels are colours (no CLUT).
+            psyqo::PrimPieces::TPageAttr attr;
+            attr.set(psyqo::Prim::TPageAttr::ColorMode::Tex16Bits);
+            attr.setPageX((uint8_t)surface->vramPageX);
+            attr.setPageY((uint8_t)surface->vramPageY);
+            attr.set(psyqo::Prim::TPageAttr::SemiTrans::HalfBackAndHalfFront);
+            PS1ChainTPage(attr);
+            uint8_t m = PS1DirectModulation();
+            psyqo::Prim::Sprite s(psyqo::Color{{.r = m, .g = m, .b = m}});
+            s.position = psyqo::Vertex{{.x = (int16_t)XPos, .y = (int16_t)YPos}};
+            s.size     = psyqo::Vertex{{.w = (int16_t)width, .h = (int16_t)height}};
+            s.texInfo  = psyqo::PrimPieces::TexInfo{(uint8_t)sprX, (uint8_t)sprY, psyqo::PrimPieces::ClutIndex()};
+            PS1ChainSprite(s);
+            PS1DirectFadeOverlay(XPos, YPos, width, height);
+            return;
+        }
         if (surface->vramPageX >= 0) {
             int basePageX = surface->vramPageX;
             int basePageY = surface->vramPageY;
@@ -2151,7 +2207,73 @@ void DrawSpriteClipped(int XPos, int YPos, int width, int height, int sprX, int 
 void DrawScaledSprite(int direction, int XPos, int YPos, int pivotX, int pivotY, int scaleX, int scaleY, int width, int height, int sprX, int sprY,
                       int sheetID) {
 #if RETRO_PLATFORM == RETRO_PS1
-    return; // PS1: software rasteriser output is never displayed; GPU path TODO (phase 3c)
+    // GPU path: one textured quad. Same placement maths as the software version below
+    // (512 = 1.0). The quad is clipped to the screen at texel boundaries so its vertices stay
+    // within one scaled texel of the screen (the GPU refuses polygons wider than 1023 or
+    // taller than 511; the intro zooms 256x160 to 3.5x) and the UVs stay exact integers.
+    if (!g_ps1GPU)
+        return;
+    GFXSurface *surf = &GfxSurface[sheetID];
+    if (!surf->vramDirect15 && surf->vramPageX < 0 && surf->width > 0 && surf->height > 0)
+        PS1UploadSpriteSheet(sheetID);
+    int texPage = surf->vramPageX;
+    int u0      = sprX;
+    if (!surf->vramDirect15) { // 8-bit sheets span up to two texture pages of 256 texels
+        texPage += 2 * (sprX >> 8);
+        u0 = sprX & 0xFF;
+    }
+    if (surf->vramPageX < 0 || width <= 0 || height <= 0 || u0 + width > 256 || sprY + height > 256)
+        return; // not uploaded, or crosses a texture page (not needed by any v2 script yet)
+    int sx = 4 * scaleX, sy = 4 * scaleY;
+    if (sx <= 0 || sy <= 0)
+        return;
+    int x0 = XPos - (sx * pivotX >> 11), y0 = YPos - (sy * pivotY >> 11);
+    int w = sx * width >> 11, h = sy * height >> 11;
+    if (w <= 0 || h <= 0 || x0 >= SCREEN_XSIZE || y0 >= SCREEN_YSIZE || x0 + w <= 0 || y0 + h <= 0)
+        return;
+    // Visible texel range [t0, t1) per axis; screen edge of texel t: x0 + t * w / width.
+    int tx0 = x0 < 0 ? (-x0 * width) / w : 0;
+    int tx1 = x0 + w > SCREEN_XSIZE ? ((SCREEN_XSIZE - x0) * width + w - 1) / w : width;
+    int ty0 = y0 < 0 ? (-y0 * height) / h : 0;
+    int ty1 = y0 + h > SCREEN_YSIZE ? ((SCREEN_YSIZE - y0) * height + h - 1) / h : height;
+    if (tx1 > width) tx1 = width;
+    if (ty1 > height) ty1 = height;
+    int qx0 = x0 + tx0 * w / width, qx1 = x0 + tx1 * w / width;
+    int qy0 = y0 + ty0 * h / height, qy1 = y0 + ty1 * h / height;
+    if (qx1 <= qx0 || qy1 <= qy0)
+        return;
+    int uL, uR; // FLIP_X mirrors the texels: screen-left shows the sprite's right edge
+    if (direction == FLIP_X) {
+        uL = u0 + width - tx0;
+        uR = u0 + width - tx1;
+    } else {
+        uL = u0 + tx0;
+        uR = u0 + tx1;
+    }
+    auto clampU = [](int u) { return (uint8_t)(u > 255 ? 255 : u); }; // 256 doesn't fit a UV byte
+    int vT = sprY + ty0, vB = sprY + ty1;
+    uint8_t m = surf->vramDirect15 ? PS1DirectModulation() : 0x80;
+    psyqo::Prim::TexturedQuad quad(psyqo::Color{{.r = m, .g = m, .b = m}});
+    quad.pointA    = psyqo::Vertex{{.x = (int16_t)qx0, .y = (int16_t)qy0}};
+    quad.uvA       = psyqo::PrimPieces::UVCoords{clampU(uL), clampU(vT)};
+    quad.clutIndex = psyqo::PrimPieces::ClutIndex(psyqo::Vertex{{.x = PS1_CLUT_X, .y = PS1_CLUT_Y}});
+    quad.pointB    = psyqo::Vertex{{.x = (int16_t)qx1, .y = (int16_t)qy0}};
+    quad.uvB       = psyqo::PrimPieces::UVCoords{clampU(uR), clampU(vT)};
+    quad.tpage.setPageX((uint8_t)texPage);
+    quad.tpage.setPageY((uint8_t)surf->vramPageY);
+    quad.tpage.set(surf->vramDirect15 ? psyqo::Prim::TPageAttr::ColorMode::Tex16Bits
+                                      : psyqo::Prim::TPageAttr::ColorMode::Tex8Bits);
+    quad.pointC = psyqo::Vertex{{.x = (int16_t)qx0, .y = (int16_t)qy1}};
+    quad.uvC    = psyqo::PrimPieces::UVCoordsPadded{clampU(uL), clampU(vB), 0};
+    quad.pointD = psyqo::Vertex{{.x = (int16_t)qx1, .y = (int16_t)qy1}};
+    quad.uvD    = psyqo::PrimPieces::UVCoordsPadded{clampU(uR), clampU(vB), 0};
+    PS1ChainQuad(quad);
+    if (surf->vramDirect15) {
+        int ox0 = qx0 < 0 ? 0 : qx0, oy0 = qy0 < 0 ? 0 : qy0;
+        int ox1 = qx1 > SCREEN_XSIZE ? SCREEN_XSIZE : qx1, oy1 = qy1 > SCREEN_YSIZE ? SCREEN_YSIZE : qy1;
+        PS1DirectFadeOverlay(ox0, oy0, ox1 - ox0, oy1 - oy0);
+    }
+    return;
 #endif
     int roundedYPos = 0;
     int roundedXPos = 0;

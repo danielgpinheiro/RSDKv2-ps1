@@ -75,6 +75,13 @@ LDFLAGS   += -lgcc
 # Real retail PS1 = 2MB RAM. The 8MB debug override is removed; the link must fit
 # the 2MB `ram` region (EXE loads at 0x80010000, so ~1.94MB usable).
 LDFLAGS   += -Wl,--defsym,RAM_SIZE=2M
+# nugget's hardware-measured memcpy/memset (8-word / 4-word blocks) instead of the small
+# default ones. The FMV copies 20 KB per video frame; loads and MEM_ZERO also benefit.
+LDFLAGS   += -Wl,-wrap,memcpy -Wl,-wrap,memset
+
+# The FMV Huffman (VLC) decoder is the hot loop of video playback: optimise it for speed.
+# Target-specific CPPFLAGS land after the global -Os (make's C++ rule: CXXFLAGS CPPFLAGS).
+ps1/mdec.o: CPPFLAGS += -O2
 
 # Cancel make's built-in `%: %.o` link rule. Without this, the extensionless libc shim
 # headers (ps1/libc/string, vector, ...) listed in .dep files are treated as targets and

@@ -17,3 +17,16 @@ void      PS1VideoClose();
 uint16_t *PS1VideoPixels();               // w*h BGR555 buffer
 int       PS1VideoWidth();
 int       PS1VideoHeight();
+
+// Game-side playback (RSDK LoadVideo / NextVideoFrame). The engine asks for frames at its
+// own pace; PS1VideoService() runs once per game frame, keeps the CD stream fed and decodes
+// one requested frame when its sectors have arrived.
+bool PS1VideoIsOpen();
+int  PS1VideoFrameCount();   // frames in the open STR
+void PS1VideoRequestFrame(); // one more frame wanted (NextVideoFrame)
+int  PS1VideoService();      // 1 = hand over PS1VideoPixels() now, 0 = nothing new, -1 = closed
+int  PS1VideoDecode(uint32_t t0); // decode ahead until the frame budget (counted from t0) is spent; -1 = EOF/error
+
+// Timing helpers (root counter 1 = hblanks, 16-bit wrap ~4 s).
+uint32_t PS1Hblanks();
+uint32_t PS1HblanksSince(uint32_t t0);

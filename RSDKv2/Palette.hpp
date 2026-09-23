@@ -29,6 +29,12 @@ extern Colour TilePaletteF[PALETTE_SIZE];
 extern Colour TilePaletteWF[PALETTE_SIZE];
 
 extern int PaletteMode;
+#if RETRO_PLATFORM == RETRO_PS1
+// Last SetFade() colour/alpha: CLUT fades can't reach 15-bit (FMV) texels, so the GPU
+// renderer re-applies it to them (and to the clear colour) while PaletteMode is set.
+extern byte ps1FadeR, ps1FadeG, ps1FadeB;
+extern int ps1FadeA;
+#endif
 
 #define RGB888_TO_RGB565(r, g, b) ((b) >> 3) | (((g) >> 2) << 5) | (((r) >> 3) << 11)
 

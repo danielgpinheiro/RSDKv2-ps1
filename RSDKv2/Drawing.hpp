@@ -35,6 +35,7 @@ struct GFXSurface {
 #if RETRO_PLATFORM == RETRO_PS1
     int vramPageX; // texture page X (N*64 halfwords); -1 = not uploaded
     int vramPageY; // texture page Y (N*256 lines)
+    bool vramDirect15; // 15-bit texture written straight to VRAM (FMV): no CLUT, no GraphicData
 #endif
 };
 
@@ -63,6 +64,7 @@ void PS1UploadPalette();
 void PS1UploadSpriteSheet(int sheetID);
 void PS1ResetSpriteVRAM();
 void PS1ResetSpriteSurfaces(); // stage change: every sheet re-uploads lazily into fresh slots
+bool PS1AllocDirectSurface(int sheetID); // 15-bit surface (<= 256x256): one 15-bit texture page
 void PS1TileSelfTest();
 #endif
 void ReleaseRenderDevice();
