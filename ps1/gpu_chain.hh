@@ -38,6 +38,9 @@ psyqo::Prim::FastFill *PS1ChainClear(uint8_t r = 0, uint8_t g = 0, uint8_t b = 0
 void PS1ChainUploadCLUT(const uint16_t *clut256, int16_t x, int16_t y); // 256-entry CLUT + cache flush
 void PS1ChainUploadRow(const uint16_t *data, int n, int16_t x, int16_t y); // n (even) halfwords, no flush
 void PS1ChainFlushCache();                                     // after CLUT/texture changes
+// Copy the last finished frame (the displayed buffer) into the buffer this frame draws into,
+// so a frame that draws nothing (paused game) shows the same image in both buffers.
+void PS1ChainRepeatLastFrame();
 // Chains a row upload of `count` (even) halfwords whose data is written later, before the
 // frame ends: keeps its early place in the chain. Returns the number of chunks (data pointers
 // in chunkData[], halfword counts in chunkLen[]), 0 if the arena is full.

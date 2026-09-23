@@ -151,6 +151,25 @@ int PS1ChainReserveRow(int count, int16_t x, int16_t y, uint16_t **chunkData, ui
     return chunks;
 }
 
+namespace {
+// GP0(80h) VRAM-to-VRAM rectangle copy (no psyqo primitive for it).
+struct VRAMCopy {
+    uint32_t command = 0x80000000;
+    psyqo::Vertex src, dst, size;
+};
+static_assert(sizeof(VRAMCopy) == 16, "VRAMCopy is 4 words");
+} // namespace
+
+void PS1ChainRepeatLastFrame() {
+    psyqo::Prim::FastFill next; // getNextClear() tells which buffer this frame's chain draws into
+    s_gpu->getNextClear(next, psyqo::Color{{.r = 0, .g = 0, .b = 0}});
+    VRAMCopy c;
+    c.dst  = next.rect.pos;
+    c.src  = psyqo::Vertex{{.x = next.rect.pos.x, .y = (int16_t)(next.rect.pos.y ? 0 : 256)}};
+    c.size = next.rect.size;
+    chainSimple(c);
+}
+
 void PS1ChainFlushCache() {
     flushBatch();
     chainSimple(psyqo::Prim::FlushCache());

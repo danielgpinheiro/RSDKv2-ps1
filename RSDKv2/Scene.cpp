@@ -3,6 +3,8 @@
 #if RETRO_PLATFORM == RETRO_PS1
 #include "common/syscalls/syscalls.h"
 #include "../ps1/sprite_atlas.hh"
+#include "../ps1/gpu_chain.hh"
+extern psyqo::GPU *g_ps1GPU;
 #endif
 
 int stageListCount[STAGELIST_MAX];
@@ -208,6 +210,13 @@ void ProcessStage(void) {
                 DrawStageGfx();
             }
 
+#if RETRO_PLATFORM == RETRO_PS1
+            else if (g_ps1GPU) {
+                // PC keeps showing its last framebuffer; psyqo flips every vsync between the
+                // last two frames, so repeat the last one into the buffer being "drawn".
+                PS1ChainRepeatLastFrame();
+            }
+#endif
             if (GKeyPress.start) {
                 StageMode = STAGEMODE_NORMAL;
                 ResumeSound();
