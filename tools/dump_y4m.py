@@ -7,7 +7,7 @@ sys.path.insert(0, "/Users/danielpinheiro/Files/Projetos_Infaliveis/PS1/RSDKv2-p
 from convert_fmv import parse_rsv, rgb_to_ycbcr
 
 def main():
-    frames = parse_rsv("/Users/danielpinheiro/Files/Projetos_Infaliveis/PS1/RSDKv2-ps1/build/iso/Data/Sprites/Videos/Intro.rsv")
+    frames = parse_rsv("/Users/danielpinheiro/Files/Projetos_Infaliveis/PS1/RSDKv2-ps1/build/fmv-src/Intro.rsv")
     w, h = frames[0][2], frames[0][3]
     out = open("/tmp/intro.y4m", "wb")
     out.write(f"YUV4MPEG2 W{w} H{h} F15:1 Ip A1:1 C420jpeg\n".encode())

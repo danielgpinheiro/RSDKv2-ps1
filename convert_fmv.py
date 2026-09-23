@@ -6,7 +6,7 @@ raw run-length bitstream (the same format encode_image.py produces), which the
 MDEC hardware feeds directly -- zero CPU decode on the PS1.
 
 Usage:
-  python3 convert_fmv.py --input build/iso/Data/Sprites/Videos/Intro.rsv [--limit N] [--out out.bin]
+  python3 convert_fmv.py --input build/fmv-src/Intro.rsv [--limit N] [--out out.bin]
 """
 import struct
 import sys
@@ -248,7 +248,7 @@ def parse_rsv(path):
 def main():
     import argparse
     ap = argparse.ArgumentParser()
-    ap.add_argument("--input", default="build/iso/Data/Sprites/Videos/Intro.rsv")
+    ap.add_argument("--input", default="build/fmv-src/Intro.rsv")
     ap.add_argument("--limit", type=int, default=0, help="only process N frames (0 = all)")
     ap.add_argument("--out", default=None, help="write raw MDEC bitstream (all frames)")
     ap.add_argument("--luma", type=int, default=LUMA_SCALE)

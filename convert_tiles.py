@@ -22,7 +22,7 @@ from PIL import Image
 
 SRC = 'build/iso/Data.bin'
 DST = 'build/iso/Data.bin'
-BAK = 'build/iso/Data.bin.bak'
+BAK = 'build/Data.bin.bak'  # outside build/iso: never shipped on the disc
 
 
 def parse(data):
