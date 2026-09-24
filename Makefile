@@ -125,6 +125,15 @@ audio:
 # Disc image (mkpsxiso BIN/CUE, MODE2 for CD-XA): build/game.bin + build/game.cue.
 disc:
 	/usr/bin/python3 tools/disc/build_disc.py
+	/usr/bin/python3 tools/disc/verify_disc.py
+
+# Distribution image (phase 9): the verified disc as build/dist/SonicNexus-PS1.bin/.cue (NTSC-U
+# license). Build the natural game first (`make -j8`, not BOOT=SSZ / MEMCARD_TEST).
+dist: disc
+	mkdir -p build/dist
+	cp build/game.bin build/dist/SonicNexus-PS1.bin
+	printf 'FILE "SonicNexus-PS1.bin" BINARY\n  TRACK 01 MODE2/2352\n    INDEX 01 00:00:00\n' > build/dist/SonicNexus-PS1.cue
+	cd build/dist && shasum -a 256 SonicNexus-PS1.bin SonicNexus-PS1.cue > SHA256SUMS && cat SHA256SUMS
 
 # Loading icon (phase 5b): ../sonic-spinning.gif -> ps1/loading_icon.h (committed; rerun after
 # changing the GIF).
@@ -135,4 +144,4 @@ icon:
 mcicons:
 	/usr/bin/python3 tools/memcard/build_icons.py
 
-.PHONY: bytecode atlas audio disc icon mcicons
+.PHONY: bytecode atlas audio disc dist icon mcicons

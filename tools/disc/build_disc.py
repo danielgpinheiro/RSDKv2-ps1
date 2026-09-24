@@ -11,6 +11,12 @@ Tree: every file under ISO_ROOT (build/iso: Data/**), macOS metadata skipped. `.
 `.str` files whose size is a whole number of 2336-byte sectors are `type="mixed"`; everything
 else is data (Form 1, read by ps1/cdrom_fs.cpp as 2048-byte sectors).
 
+Trim (phase 9): the PC source assets the pipeline already converted never go on the disc —
+SOURCE_ONLY extensions (.gif sheets/tiles -> atlas/.vram, .wav -> .vag, .ogg -> Music.xa,
+16x16Tiles.raw -> .vram, script .txt -> bytecode). On PS1, LoadGIFFile returns before opening
+anything and ParseScriptFile is compiled out. The build fails if tools/disc/load_order.txt (what
+the game opens) lists an excluded file. tools/disc/verify_disc.py checks the image afterwards.
+
 Layout (load-time phase): mkpsxiso gives files their LBAs in XML order across the whole tree (a
 repeated <dir> reopens the same directory; directory records stay sorted by name). Data files are
 laid out in the order the game loads them (tools/disc/load_order.txt, from
@@ -39,6 +45,11 @@ def file_type(path):
 
 
 ORDER = os.path.join(HERE, 'load_order.txt')
+SOURCE_ONLY = ('.gif', '.wav', '.ogg', '.raw', '.txt')
+
+
+def excluded(rel):
+    return os.path.splitext(rel)[1].lower() in SOURCE_ONLY
 
 
 def disc_files(iso_root):
@@ -51,13 +62,15 @@ def disc_files(iso_root):
 
 def layout(iso_root):
     """Data files in load order, then the remaining data files, then the streams."""
-    files = disc_files(iso_root)
+    files = [f for f in disc_files(iso_root) if not excluded(f)]
     by_lower = {f.lower(): f for f in files}
     ordered = []
     if os.path.exists(ORDER):
         for line in open(ORDER):
             line = line.strip()
             f = by_lower.get(line.lower())
+            if line and not line.startswith('#') and excluded(line):
+                sys.exit('ERROR: the game opens %s, a source-only type left off the disc' % line)
             if line and not line.startswith('#') and f and f not in ordered:
                 ordered.append(f)
     rest = [f for f in files if f not in ordered]
@@ -94,6 +107,8 @@ def main():
     tree.append('\t\t\t<file name="SYSTEM.CNF" source=%s/>' % quoteattr(cnf))
     tree.append('\t\t\t<file name="PSX.EXE" source=%s/>' % quoteattr(exe))
     files, n_ordered = layout(iso_root)
+    left_out = [f for f in disc_files(iso_root) if excluded(f)]
+    left_bytes = sum(os.path.getsize(os.path.join(iso_root, f)) for f in left_out)
     for rel in files:
         emit_file(rel, iso_root, tree, counts)
     xml = '\n'.join([
@@ -114,9 +129,10 @@ def main():
     open(xml_path, 'w').write(xml)
     subprocess.run([MKPSXISO, '-y', '-q', '-w', xml_path], check=True)
     size = os.path.getsize(out + '.bin')
-    print('disc %s.bin/.cue: %.1f MB (%d sectors) | files: %s (%d in load order) | license %s' % (
+    print('disc %s.bin/.cue: %.1f MB (%d sectors) | files: %s (%d in load order) | left out %d source files '
+          '(%.1f MB) | license %s' % (
         out, size / 1048576, size // 2352, ', '.join('%s %d' % kv for kv in sorted(counts.items())), n_ordered,
-        os.path.basename(lic)))
+        len(left_out), left_bytes / 1048576, os.path.basename(lic)))
 
 
 if __name__ == '__main__':
