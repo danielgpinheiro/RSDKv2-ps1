@@ -57,6 +57,10 @@ struct SFXInfo {
     Sint16 *buffer;
     size_t length;
     bool loaded;
+#if RETRO_PLATFORM == RETRO_PS1
+    uint32_t spuAddr; // SPU-ADPCM sample in SPU RAM (build-time .vag, tools/audio/build_sfx.py)
+    uint32_t rate;
+#endif
 };
 
 struct ChannelInfo {
@@ -164,10 +168,21 @@ inline void StopMusic()
 
 void LoadSfx(char *filePath, byte sfxID);
 void PlaySfx(int sfx, bool loop);
+#if RETRO_PLATFORM == RETRO_PS1
+// SPU voices of the RSDK sfx channels (voices 1 and 3 have SPU capture buffers).
+void PS1SfxChannelStop(int channel);
+void PS1SfxReleaseStage();
+void PS1SfxReleaseGlobal();
+void PS1AudioUpdate(); // once per frame: frees channels whose sample ended (PC mixer semantics)
+void PS1SpuDebugService(); // GDB: g_ps1SpuDumpAddr/Len -> SPU RAM copied into TileGfx
+#endif
 inline void StopSfx(int sfx)
 {
     for (int i = 0; i < CHANNEL_COUNT; ++i) {
         if (sfxChannels[i].sfxID == sfx) {
+#if RETRO_PLATFORM == RETRO_PS1
+            PS1SfxChannelStop(i);
+#endif
             MEM_ZERO(sfxChannels[i]);
             sfxChannels[i].sfxID = -1;
         }
@@ -199,7 +214,12 @@ inline void ResumeSound()
 
 inline void StopAllSfx()
 {
-    for (int i = 0; i < CHANNEL_COUNT; ++i) sfxChannels[i].sfxID = -1;
+    for (int i = 0; i < CHANNEL_COUNT; ++i) {
+#if RETRO_PLATFORM == RETRO_PS1
+        PS1SfxChannelStop(i);
+#endif
+        sfxChannels[i].sfxID = -1;
+    }
 }
 inline void ReleaseGlobalSfx()
 {
@@ -213,6 +233,9 @@ inline void ReleaseGlobalSfx()
         }
     }
     NoGlobalSFX = 0;
+#if RETRO_PLATFORM == RETRO_PS1
+    PS1SfxReleaseGlobal();
+#endif
 }
 inline void ReleaseStageSfx()
 {
@@ -225,6 +248,9 @@ inline void ReleaseStageSfx()
         }
     }
     NoStageSFX = 0;
+#if RETRO_PLATFORM == RETRO_PS1
+    PS1SfxReleaseStage();
+#endif
 }
 
 inline void ReleaseSoundDevice()

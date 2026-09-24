@@ -48,6 +48,7 @@ ps1/video.cpp \
 ps1/gpu_chain.cpp \
 ps1/cdrom_stream.cpp \
 ps1/sprite_atlas.cpp \
+ps1/spu.cpp \
 
 # Engine include dir (belt-and-suspenders; quote-includes resolve relative to the .cpp anyway).
 # ps1/libc comes FIRST: its C/C++ shim headers (<string>, <cmath>, <stdio.h>, ...)
@@ -104,4 +105,8 @@ atlas: bytecode
 	/usr/bin/python3 tools/atlas/build_atlas.py build/iso/Data build/manifest
 	/usr/bin/python3 tools/bgstrips/build_bgstrips.py build/iso/Data
 
-.PHONY: bytecode atlas
+# Build-time audio (phase 5): Data/SoundFX/**/*.wav -> .vag (SPU-ADPCM, psxavenc).
+audio:
+	/usr/bin/python3 tools/audio/build_sfx.py build/iso/Data
+
+.PHONY: bytecode atlas audio

@@ -186,6 +186,8 @@ class RSDKv2PS1App final : public psyqo::Application {
         if (s_ps1PerfVideoTick)
             PS1UpdateVideoTexture();
         PS1ChainBegin(gpu()); // all per-frame drawing is DMA-chained (ps1/gpu_chain.hh)
+        PS1AudioUpdate();     // frees SFX channels whose sample ended (before the scripts run)
+        PS1SpuDebugService();
         Engine.RunFrame();
         PS1ChainEnd();        // psyqo sends the chain after frame() returns
         uint32_t cpu     = PS1HblanksSince(t0);

@@ -2,6 +2,8 @@
 #include <cmath>
 #if RETRO_PLATFORM != RETRO_PS1
 #include <iostream>
+#else
+#include "../ps1/spu.hh"
 #endif
 
 int NoGlobalSFX = 0;
@@ -49,6 +51,62 @@ SDL_AudioDeviceID audioDevice;
 
 #define MIX_BUFFER_SAMPLES (256)
 
+#if RETRO_PLATFORM == RETRO_PS1
+// SFX on the SPU (phase 5). Samples are pre-converted .vag files (tools/audio/build_sfx.py)
+// uploaded to SPU RAM by a bump allocator: global sfx first (kept), stage sfx after them
+// (reset by ReleaseStageSfx). RSDK channel c plays on SPU voice s_ps1SfxVoice[c].
+static const int s_ps1SfxVoice[CHANNEL_COUNT] = { 1, 3, 5, 7 };
+static uint32_t s_ps1SpuNext      = PS1_SPU_SAMPLE_START;
+static uint32_t s_ps1SpuGlobalEnd = PS1_SPU_SAMPLE_START;
+volatile uint32_t g_ps1SfxLoaded  = 0; // sfx uploaded since boot (GDB)
+volatile uint32_t g_ps1SfxPlays   = 0; // voice key-ons
+volatile uint32_t g_ps1SfxMissing = 0; // LoadSfx: .vag missing or SPU RAM full
+
+static void PS1SfxMarkGlobalEnd() { s_ps1SpuGlobalEnd = s_ps1SpuNext; }
+void PS1SfxReleaseStage() { s_ps1SpuNext = s_ps1SpuGlobalEnd; }
+void PS1SfxReleaseGlobal() { s_ps1SpuNext = s_ps1SpuGlobalEnd = PS1_SPU_SAMPLE_START; }
+
+void PS1SfxChannelStop(int channel) { PS1SpuVoiceStop(1u << s_ps1SfxVoice[channel]); }
+
+// PC mixer: ProcessAudioMixing scales the side opposite to the pan by 1 - |pan| / 100.
+static void PS1SfxChannelStart(int channel) {
+    ChannelInfo *ch = &sfxChannels[channel];
+    if (ch->sfxID < 0 || !sfxList[ch->sfxID].loaded)
+        return;
+    int vol = 0x3fff * sfxVolume / MAX_VOLUME;
+    int volL = vol, volR = vol;
+    if (ch->pan < 0)
+        volR = vol * (100 + ch->pan) / 100;
+    else if (ch->pan > 0)
+        volL = vol * (100 - ch->pan) / 100;
+    PS1SpuVoicePlay(s_ps1SfxVoice[channel], sfxList[ch->sfxID].spuAddr, sfxList[ch->sfxID].rate, (uint16_t)volL, (uint16_t)volR);
+    g_ps1SfxPlays = g_ps1SfxPlays + 1;
+}
+
+// GDB evidence aid: set g_ps1SpuDumpLen (<= 64 KB) and g_ps1SpuDumpAddr; the next frame reads
+// that SPU RAM range into TileGfx (a load-time buffer) and clears g_ps1SpuDumpLen.
+volatile uint32_t g_ps1SpuDumpAddr = 0;
+volatile uint32_t g_ps1SpuDumpLen  = 0;
+void PS1SpuDebugService() {
+    if (g_ps1SpuDumpLen) {
+        uint32_t n = g_ps1SpuDumpLen > sizeof(TileGfx) ? sizeof(TileGfx) : g_ps1SpuDumpLen;
+        PS1SpuRead(g_ps1SpuDumpAddr, TileGfx, (n + 63) & ~63u);
+        g_ps1SpuDumpLen = 0;
+    }
+}
+
+void PS1AudioUpdate() {
+    if (!audioEnabled)
+        return;
+    // PC frees a channel (StopSfx of its sfx) when its sample runs out; on the SPU the voice's
+    // envelope drops to 0 at the sample's end block.
+    for (int c = 0; c < CHANNEL_COUNT; ++c) {
+        if (sfxChannels[c].sfxID >= 0 && !sfxChannels[c].loopSFX && !PS1SpuVoiceEnvelope(s_ps1SfxVoice[c]))
+            StopSfx(sfxChannels[c].sfxID);
+    }
+}
+#endif
+
 int InitSoundDevice()
 {
     StopAllSfx(); //"init"
@@ -85,7 +143,14 @@ int InitSoundDevice()
 
 #endif
 
+#if RETRO_PLATFORM == RETRO_PS1
+    PS1SpuInit();
+    audioEnabled = true;
+#endif
     LoadGlobalSfx();
+#if RETRO_PLATFORM == RETRO_PS1
+    PS1SfxMarkGlobalEnd();
+#endif
 
     return true;
 }
@@ -516,6 +581,45 @@ void LoadSfx(char *filePath, byte sfxID)
     StrCopy(fullPath, "Data/SoundFX/");
     StrAdd(fullPath, filePath);
 
+#if RETRO_PLATFORM == RETRO_PS1
+    // X.wav -> X.vag: 48-byte VAG header (big-endian size at 0x0C, rate at 0x10), then SPU-ADPCM
+    // padded to 64 bytes. Uploaded straight to SPU RAM through the TileGfx staging buffer.
+    if (sfxList[sfxID].loaded && StrComp(sfxList[sfxID].name, filePath))
+        return; // same stage reloaded: already in SPU RAM
+    int len = StrLength(fullPath);
+    if (len > 4 && fullPath[len - 4] == '.')
+        StrCopy(&fullPath[len - 3], "vag");
+    // Read the whole .vag with one fread (cdrom_fs reads it in a single CD request) instead of
+    // the engine's 8 KB FileRead refills (one CD request each).
+    FILE *f = fopen(fullPath, "rb");
+    if (!f) {
+        g_ps1SfxMissing = g_ps1SfxMissing + 1;
+        return;
+    }
+    size_t fileSize = f->size;
+    uint32_t size   = fileSize > 48 ? (uint32_t)(fileSize - 48) : 0; // padded data (multiple of 64)
+    if (fileSize > sizeof(TileGfx) || !size || s_ps1SpuNext + size > PS1_SPU_SAMPLE_END
+        || fread(TileGfx, 1, fileSize, f) != fileSize) {
+        fclose(f);
+        g_ps1SfxMissing = g_ps1SfxMissing + 1;
+        return;
+    }
+    fclose(f);
+    const byte *head = TileGfx;
+    uint32_t rate    = (head[0x10] << 24) | (head[0x11] << 16) | (head[0x12] << 8) | head[0x13];
+    uint32_t addr    = s_ps1SpuNext;
+    PS1SpuWrite(addr, TileGfx + 48, size);
+    s_ps1SpuNext = addr + size;
+    StrCopy(sfxList[sfxID].name, filePath);
+    sfxList[sfxID].buffer  = nullptr;
+    sfxList[sfxID].length  = size;
+    sfxList[sfxID].spuAddr = addr;
+    sfxList[sfxID].rate    = rate;
+    sfxList[sfxID].loaded  = true;
+    g_ps1SfxLoaded = g_ps1SfxLoaded + 1;
+    return;
+#endif
+
     if (LoadFile(fullPath, &info)) {
         byte *sfx = new byte[info.fileSize];
         FileRead(sfx, info.fileSize);
@@ -590,6 +694,9 @@ void PlaySfx(int sfx, bool loop)
     sfxInfo->pan          = 0;
     if (nextChannelPos == CHANNEL_COUNT)
         nextChannelPos = 0;
+#if RETRO_PLATFORM == RETRO_PS1
+    PS1SfxChannelStart(sfxChannelID);
+#endif
     UnlockAudioDevice();
 }
 void SetSfxAttributes(int sfx, int loopCount, sbyte pan)
@@ -612,5 +719,8 @@ void SetSfxAttributes(int sfx, int loopCount, sbyte pan)
     sfxInfo->loopSFX      = loopCount == -1 ? sfxInfo->loopSFX : loopCount;
     sfxInfo->pan          = pan;
     sfxInfo->sfxID        = sfx;
+#if RETRO_PLATFORM == RETRO_PS1
+    PS1SfxChannelStart(sfxChannel);
+#endif
     UnlockAudioDevice();
 }
