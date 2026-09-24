@@ -24,9 +24,10 @@ RSDKv2-Decompilation (Retro Engine v2, Sonic Nexus 2008) ported to the PS1 with
 ```bash
 make -j8                                   # rsdkv2.ps-exe, rsdkv2.elf, rsdkv2.map (natural boot)
 mipsel-none-elf-size rsdkv2.elf            # must fit retail 2 MB
-rm -f build/game.iso && hdiutil makehybrid -iso -joliet -o build/game.iso build/iso
+make atlas audio                           # build-time assets (after data/script changes)
+make disc                                  # mkpsxiso -> build/game.bin + build/game.cue (MODE2, XA)
 timeout 60 /Applications/PCSX-Redux.app/Contents/MacOS/PCSX-Redux -run -fastboot \
-  -iso build/game.iso -exe rsdkv2.ps-exe -stdout -logfile /tmp/rsdkv2.log &
+  -iso build/game.cue -exe rsdkv2.ps-exe -stdout -logfile /tmp/rsdkv2.log &
 # GDB: add -interpreter -debugger -gdb -gdb-port 3333, then
 # /opt/homebrew/bin/gdb --batch -x verify.gdb   (target remote localhost:3333; symbol-file rsdkv2.elf)
 ```
@@ -38,7 +39,8 @@ timeout 60 /Applications/PCSX-Redux.app/Contents/MacOS/PCSX-Redux -run -fastboot
 | `RSDKv2/` | Engine; PS1 code behind `#if RETRO_PLATFORM == RETRO_PS1` (Drawing.cpp, Scene.*, RetroEngine.*, Sprite.cpp, main.cpp, …) |
 | `RSDKv2/main.cpp` | `RSDKv2PS1App : psyqo::Application`, test switches, `Engine.RunFrame()` per frame |
 | `RSDKv2/Drawing.cpp` (PS1 block at the top, `DrawStageGfx`, `DrawSprite`, `DrawRotatedSprite`) | GPU renderer: CLUT, tile/sprite pages, chained prims |
-| `ps1/cdrom_fs.cpp` | ISO9660 walker + `FILE*` shim over `psyqo::CDRomDevice` |
+| `ps1/cdrom_fs.cpp` | ISO9660 walker + `FILE*` shim over `psyqo::CDRomDevice` (directory-sector cache, resident small files) |
+| `ps1/spu.*`, `ps1/xa_music.*` | SPU driver (ps1-bare-metal model) + CD-XA music Action; engine side in `RSDKv2/Audio.cpp` (PS1 branch) |
 | `ps1/mdec.cpp`, `ps1/video.cpp` | MDEC/VLC driver (psxpress port, `-O2`) + STR player: heap buffers only while open, budgeted decode-ahead for the game (`PS1VideoService/Decode`) |
 | `RSDKv2/Video.cpp`, `Sprite.cpp` `LoadRSVFile` (PS1) | `LoadVideo`/`NextVideoFrame` → `Intro.str` as a 15-bit VRAM texture surface (`vramDirect15`) |
 | `ps1/gpu_chain.*` | DMA-chained renderer helpers (arena per parity, ≤14-word fragments) |
@@ -82,7 +84,11 @@ timeout 60 /Applications/PCSX-Redux.app/Contents/MacOS/PCSX-Redux -run -fastboot
   blocking CD reads, `../docs/26` F14). Stage-change state (tile set, atlas, sprite surfaces)
   must be reset per stage: test the menu flow, not only `BOOT=SSZ`.
 - **One CD action at a time**: stop the FMV (`PS1StopVideo`) before any file read; stage
-  loads already do.
+  loads already do. CD-XA music streams continuously too: `fopen` stops it (counted); files the
+  scripts read during play must be resident in RAM (`PS1FsPreloadDir`, `Data/Palettes` today).
+- **Audio**: SPU RAM 0x1000.. = SFX (global, then stage), dummy 0x7FFE0, capture buffers below
+  0x1000; SFX/music/intro assets come from `make audio`; the disc from `make disc` (license
+  `../LICENSE.DAT`, never committed). Listen at full speed after audio changes.
 - `ps1/libc` maths is ours (soft-float): `sinf` once filled the trig tables with garbage.
   Compare shim results with PC values when touching it.
 - Verify with `tools/run_test.sh` (60 fps = `PERF last=1`, `CHAIN overflow=0`) and
