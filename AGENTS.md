@@ -26,6 +26,8 @@ make -j8                                   # rsdkv2.ps-exe, rsdkv2.elf, rsdkv2.m
 mipsel-none-elf-size rsdkv2.elf            # must fit retail 2 MB
 make atlas audio                           # build-time assets (after data/script changes)
 make disc                                  # mkpsxiso -> build/game.bin + build/game.cue (MODE2, XA)
+                                           #   files in load order (tools/disc/load_order.txt)
+tools/load_profile.sh ssz|natural LOG      # per-load / per-file CD request profile (--order regenerates the layout)
 timeout 60 /Applications/PCSX-Redux.app/Contents/MacOS/PCSX-Redux -run -fastboot \
   -iso build/game.cue -exe rsdkv2.ps-exe -stdout -logfile /tmp/rsdkv2.log &
 # GDB: add -interpreter -debugger -gdb -gdb-port 3333, then
@@ -39,7 +41,7 @@ timeout 60 /Applications/PCSX-Redux.app/Contents/MacOS/PCSX-Redux -run -fastboot
 | `RSDKv2/` | Engine; PS1 code behind `#if RETRO_PLATFORM == RETRO_PS1` (Drawing.cpp, Scene.*, RetroEngine.*, Sprite.cpp, main.cpp, …) |
 | `RSDKv2/main.cpp` | `RSDKv2PS1App : psyqo::Application`, test switches, `Engine.RunFrame()` per frame |
 | `RSDKv2/Drawing.cpp` (PS1 block at the top, `DrawStageGfx`, `DrawSprite`, `DrawRotatedSprite`) | GPU renderer: CLUT, tile/sprite pages, chained prims |
-| `ps1/cdrom_fs.cpp` | ISO9660 walker + `FILE*` shim over `psyqo::CDRomDevice` (directory-sector cache, resident small files) |
+| `ps1/cdrom_fs.cpp` | ISO9660 walker + `FILE*` shim over `psyqo::CDRomDevice` (directory-sector cache, resident small files, 3 × 64 KB read-ahead windows during loads; counters `g_ps1FsRequests/Sectors/ReadUs`) |
 | `ps1/spu.*`, `ps1/xa_music.*` | SPU driver (ps1-bare-metal model) + CD-XA music Action; engine side in `RSDKv2/Audio.cpp` (PS1 branch) |
 | `ps1/mdec.cpp`, `ps1/video.cpp` | MDEC/VLC driver (psxpress port, `-O2`) + STR player: heap buffers only while open, budgeted decode-ahead for the game (`PS1VideoService/Decode`) |
 | `RSDKv2/Video.cpp`, `Sprite.cpp` `LoadRSVFile` (PS1) | `LoadVideo`/`NextVideoFrame` → `Intro.str` as a 15-bit VRAM texture surface (`vramDirect15`) |

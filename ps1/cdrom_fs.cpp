@@ -24,11 +24,31 @@ volatile uint32_t g_ps1VideoForcedClose = 0; // file reads that had to stop an o
 extern psyqo::GPU         *g_ps1GPU;
 
 #define ISO_SECTOR 2048
-#define SECTOR_BATCH 16 /* read up to 16 consecutive sectors (32KB) per blocking call */
 #define DIRECT_MAX   32 /* sector-aligned reads straight into the caller's buffer: up to 64KB per call */
 
 static uint8_t *s_sec;
-static uint8_t s_batch[SECTOR_BATCH * ISO_SECTOR];
+
+/* Read-ahead windows (load-time phase). Every blocking request costs a Setloc/ReadN(seek)/Pause
+ * cycle, which dominates load times (the engine refills 8 KB at a time and re-opens config files
+ * over and over). A buffered read that misses fetches WINDOW_SECTORS sectors at once and later
+ * reads are served from RAM. The window runs past the file's end: tools/disc/build_disc.py lays
+ * the data files out in load order, so it usually holds the next files the game opens (the
+ * CD-XA/STR streams sit after all data; read as data they are just unused sectors). Three LRU
+ * slots (the engine re-reads GameConfig between the SFX it loads), heap-allocated on first use,
+ * freed after each load
+ * (PS1FsReleaseWindows from PS1LoadingEnd) or at fclose outside a load. */
+#define WINDOW_SECTORS 32
+#define WINDOWS        3
+struct Window {
+    uint8_t *buf;
+    uint32_t lba, count, age;
+};
+static Window s_win[WINDOWS];
+static bool readViaWindows(uint32_t lba, uint32_t bytes, uint8_t *dst);
+static uint32_t s_winClock    = 0;
+static uint32_t s_volumeEnd   = 0; // sectors in the volume (PVD): read-ahead never goes past it
+volatile uint32_t g_ps1FsWindowHits  = 0; // buffered reads served from a window (GDB)
+volatile uint32_t g_ps1FsWindowFills = 0; // window misses (one CD request each)
 
 /* findFile reads the volume descriptor and every directory on the path for each fopen; the disc
  * is read-only, so those sectors are cached (LRU) instead of costing a blocking CD request each. */
@@ -39,6 +59,28 @@ static uint32_t s_dirCacheAge[DIR_CACHE];
 static uint32_t s_dirCacheClock = 0;
 volatile uint32_t g_ps1FsDirReads = 0; // directory sectors read from the CD (cache misses, GDB)
 volatile uint32_t g_ps1FsDirHits  = 0;
+
+volatile uint32_t g_ps1FsRequests = 0; // blocking CD requests (each = Setloc/ReadN/Pause), GDB
+volatile uint32_t g_ps1FsSectors  = 0; // sectors those requests read
+
+volatile uint32_t g_ps1FsReadUs   = 0; // time spent inside them (microseconds)
+
+// GDB profiling point (tools/load_profile.sh): one call per request, after it completed.
+extern "C" __attribute__((noinline)) void PS1FsProfileHook(uint32_t lba, uint32_t count, uint32_t us) {
+    __asm__ volatile("" ::"r"(lba), "r"(count), "r"(us));
+}
+
+// Every file-system CD read goes through here (counted for load profiling).
+static bool cdRead(uint32_t lba, uint32_t count, void *dst) {
+    uint32_t t0 = g_ps1GPU->now();
+    bool ok     = g_ps1CDRom->readSectorsBlocking(lba, count, dst, *g_ps1GPU);
+    uint32_t us = g_ps1GPU->now() - t0;
+    g_ps1FsRequests = g_ps1FsRequests + 1;
+    g_ps1FsSectors  = g_ps1FsSectors + count;
+    g_ps1FsReadUs   = g_ps1FsReadUs + us;
+    PS1FsProfileHook(lba, count, us);
+    return ok;
+}
 
 static bool readSector(uint32_t lba) {
     int victim = 0;
@@ -52,7 +94,7 @@ static bool readSector(uint32_t lba) {
         if (s_dirCacheAge[i] < s_dirCacheAge[victim])
             victim = i;
     }
-    if (!g_ps1CDRom->readSectorsBlocking(lba, 1, s_dirCache[victim], *g_ps1GPU)) {
+    if (!cdRead(lba, 1, s_dirCache[victim])) {
         s_dirCacheAge[victim] = 0;
         return false;
     }
@@ -92,6 +134,7 @@ static bool nameMatchesBounded(const char *name, int nameLen, const uint8_t *ent
 static bool findEntry(const char *path, uint32_t *outLba, uint32_t *outSize, bool wantDir) {
     if (!readSector(16)) /* Primary Volume Descriptor */
         return false;
+    s_volumeEnd = le32(s_sec + 80); /* volume space size */
     /* Root directory record is at PVD offset 156. */
     uint32_t dirLba  = le32(s_sec + 156 + 2);
     uint32_t dirSize = le32(s_sec + 156 + 10);
@@ -200,9 +243,8 @@ int PS1FsPreloadDir(const char *dir, uint32_t maxSize) {
                 int n = snprintf(r.path, sizeof(r.path), "%s/", dir);
                 for (int i = 0; i < nlen && q[33 + i] != ';' && n < (int)sizeof(r.path) - 1; ++i) r.path[n++] = (char)q[33 + i];
                 r.path[n] = 0;
-                uint32_t secs = (sz + ISO_SECTOR - 1) / ISO_SECTOR;
-                r.data        = (uint8_t *)malloc(secs * ISO_SECTOR);
-                if (r.data && g_ps1CDRom->readSectorsBlocking(lba, secs, r.data, *g_ps1GPU)) {
+                r.data = (uint8_t *)malloc(sz ? sz : 1);
+                if (r.data && readViaWindows(lba, sz, r.data)) { // contiguous files: few requests
                     r.size = sz;
                     ++s_residentCount;
                     ++loaded;
@@ -251,16 +293,72 @@ FILE *fopen(const char *path, const char *mode) {
     f->lba   = lba;
     f->size  = size;
     f->pos   = 0;
-    f->valid = 1;
-    f->mem   = nullptr;
+    f->valid  = 1;
+    f->mem    = nullptr;
     return f;
 }
+
+void PS1FsReleaseWindows() {
+    for (auto &w : s_win) {
+        free(w.buf);
+        w = Window{};
+    }
+}
+
+bool PS1LoadingActive(); // loading.cpp
 
 int fclose(FILE *f) {
     if (!f)
         return 0;
     free(f);
+    if (!PS1LoadingActive())
+        PS1FsReleaseWindows(); // reads outside a bracketed load don't keep 192 KB of heap
     return 0;
+}
+
+// The window holding `sector`, filling the least recently used one on a miss (one CD request of
+// up to WINDOW_SECTORS sectors).
+static Window *windowFor(uint32_t sector);
+
+static bool readViaWindows(uint32_t lba, uint32_t bytes, uint8_t *dst) {
+    for (uint32_t pos = 0; pos < bytes;) {
+        Window *w = windowFor(lba + pos / ISO_SECTOR);
+        if (!w)
+            return false;
+        uint32_t skip  = (lba - w->lba) * ISO_SECTOR + pos;
+        uint32_t chunk = w->count * ISO_SECTOR - skip;
+        if (chunk > bytes - pos)
+            chunk = bytes - pos;
+        memcpy(dst + pos, w->buf + skip, chunk);
+        pos += chunk;
+    }
+    return true;
+}
+
+static Window *windowFor(uint32_t sector) {
+    Window *victim = &s_win[0];
+    for (auto &w : s_win) {
+        if (w.buf && w.count && sector >= w.lba && sector < w.lba + w.count) {
+            w.age            = ++s_winClock;
+            g_ps1FsWindowHits = g_ps1FsWindowHits + 1;
+            return &w;
+        }
+        if (w.age < victim->age)
+            victim = &w;
+    }
+    if (!victim->buf && !(victim->buf = (uint8_t *)malloc(WINDOW_SECTORS * ISO_SECTOR)))
+        return nullptr;
+    uint32_t count = s_volumeEnd > sector ? s_volumeEnd - sector : 1;
+    if (count > WINDOW_SECTORS)
+        count = WINDOW_SECTORS;
+    victim->count = 0;
+    if (!cdRead(sector, count, victim->buf))
+        return nullptr;
+    victim->lba        = sector;
+    victim->count      = count;
+    victim->age        = ++s_winClock;
+    g_ps1FsWindowFills = g_ps1FsWindowFills + 1;
+    return victim;
 }
 
 size_t fread(void *ptr, size_t size, size_t nmemb, FILE *f) {
@@ -280,36 +378,28 @@ size_t fread(void *ptr, size_t size, size_t nmemb, FILE *f) {
         return want / size;
     }
     while (remaining > 0) {
-        uint32_t sector     = f->lba + (f->pos / ISO_SECTOR);
-        uint32_t off        = f->pos % ISO_SECTOR;
-        // Whole sectors into an aligned destination: one blocking read (one seek) straight into
-        // it, up to DIRECT_MAX sectors. Every readSectorsBlocking call costs a Setloc/ReadN/Pause
-        // cycle, so few big reads are much faster than many small ones.
-        if (off == 0 && remaining >= ISO_SECTOR && !((uintptr_t)dst & 3)) {
+        uint32_t sector = f->lba + (f->pos / ISO_SECTOR);
+        uint32_t off    = f->pos % ISO_SECTOR;
+        // Big sector-aligned reads (a whole window or more) go straight into the caller's buffer:
+        // one request of up to DIRECT_MAX sectors, no copy.
+        if (off == 0 && remaining >= WINDOW_SECTORS * ISO_SECTOR && !((uintptr_t)dst & 3)) {
             uint32_t n = (uint32_t)(remaining / ISO_SECTOR);
             if (n > DIRECT_MAX)
                 n = DIRECT_MAX;
-            if (!g_ps1CDRom->readSectorsBlocking(sector, n, dst, *g_ps1GPU))
+            if (!cdRead(sector, n, dst))
                 break;
             dst += n * ISO_SECTOR;
             f->pos += n * ISO_SECTOR;
             remaining -= n * ISO_SECTOR;
             continue;
         }
-        uint32_t lastSector = f->lba + (f->size + ISO_SECTOR - 1) / ISO_SECTOR;
-        uint32_t sectors    = (off + (uint32_t)remaining + ISO_SECTOR - 1) / ISO_SECTOR;
-        if (sectors > SECTOR_BATCH)
-            sectors = SECTOR_BATCH;
-        uint32_t maxSectors = lastSector - sector;
-        if (sectors > maxSectors)
-            sectors = maxSectors;
-        if (sectors == 0)
+        Window *w = windowFor(sector);
+        if (!w)
             break;
-        if (!g_ps1CDRom->readSectorsBlocking(sector, sectors, s_batch, *g_ps1GPU))
-            break;
-        uint32_t avail = sectors * ISO_SECTOR - off;
+        uint32_t skip  = (sector - w->lba) * ISO_SECTOR + off;
+        uint32_t avail = w->count * ISO_SECTOR - skip;
         uint32_t chunk = (avail < remaining) ? avail : (uint32_t)remaining;
-        memcpy(dst, s_batch + off, chunk);
+        memcpy(dst, w->buf + skip, chunk);
         dst += chunk;
         f->pos += chunk;
         remaining -= chunk;

@@ -11,6 +11,12 @@ Tree: every file under ISO_ROOT (build/iso: Data/**), macOS metadata skipped. `.
 `.str` files whose size is a whole number of 2336-byte sectors are `type="mixed"`; everything
 else is data (Form 1, read by ps1/cdrom_fs.cpp as 2048-byte sectors).
 
+Layout (load-time phase): mkpsxiso gives files their LBAs in XML order across the whole tree (a
+repeated <dir> reopens the same directory; directory records stay sorted by name). Data files are
+laid out in the order the game loads them (tools/disc/load_order.txt, from
+tools/load_profile.sh natural --order), then the other data files by path, then the streams, so
+cdrom_fs's read-ahead windows usually already hold the next file the game opens.
+
 Usage: build_disc.py [ISO_ROOT] [EXE] [LICENSE] [OUT_PREFIX]
   defaults: build/iso rsdkv2.ps-exe ../LICENSE.DAT build/game
 """
@@ -32,20 +38,42 @@ def file_type(path):
     return 'data'
 
 
-def emit_dir(path, indent, out, counts):
-    for name in sorted(os.listdir(path)):
-        if name.startswith('.'):
-            continue
-        full = os.path.join(path, name)
-        pad = '\t' * indent
-        if os.path.isdir(full):
-            out.append('%s<dir name=%s>' % (pad, quoteattr(name)))
-            emit_dir(full, indent + 1, out, counts)
-            out.append('%s</dir>' % pad)
-        else:
-            t = file_type(full)
-            counts[t] = counts.get(t, 0) + 1
-            out.append('%s<file name=%s type="%s" source=%s/>' % (pad, quoteattr(name), t, quoteattr(full)))
+ORDER = os.path.join(HERE, 'load_order.txt')
+
+
+def disc_files(iso_root):
+    out = []
+    for d, dirs, names in os.walk(iso_root):
+        dirs[:] = sorted(x for x in dirs if not x.startswith('.'))
+        out += [os.path.relpath(os.path.join(d, n), iso_root) for n in sorted(names) if not n.startswith('.')]
+    return sorted(f for f in out if os.sep in f)  # root files: only SYSTEM.CNF + PSX.EXE (added by main)
+
+
+def layout(iso_root):
+    """Data files in load order, then the remaining data files, then the streams."""
+    files = disc_files(iso_root)
+    by_lower = {f.lower(): f for f in files}
+    ordered = []
+    if os.path.exists(ORDER):
+        for line in open(ORDER):
+            line = line.strip()
+            f = by_lower.get(line.lower())
+            if line and not line.startswith('#') and f and f not in ordered:
+                ordered.append(f)
+    rest = [f for f in files if f not in ordered]
+    data = [f for f in ordered + rest if file_type(os.path.join(iso_root, f)) == 'data']
+    return data + [f for f in ordered + rest if f not in data], len(ordered)
+
+
+def emit_file(rel, iso_root, out, counts):
+    parts = rel.split(os.sep)
+    full = os.path.join(iso_root, rel)
+    t = file_type(full)
+    counts[t] = counts.get(t, 0) + 1
+    line = '<file name=%s type="%s" source=%s/>' % (quoteattr(parts[-1]), t, quoteattr(full))
+    for d in reversed(parts[:-1]):
+        line = '<dir name=%s>%s</dir>' % (quoteattr(d), line)
+    out.append('\t\t\t' + line)
 
 
 def main():
@@ -65,12 +93,9 @@ def main():
     tree = []
     tree.append('\t\t\t<file name="SYSTEM.CNF" source=%s/>' % quoteattr(cnf))
     tree.append('\t\t\t<file name="PSX.EXE" source=%s/>' % quoteattr(exe))
-    for name in sorted(os.listdir(iso_root)):
-        full = os.path.join(iso_root, name)
-        if os.path.isdir(full):
-            tree.append('\t\t\t<dir name=%s>' % quoteattr(name))
-            emit_dir(full, 4, tree, counts)
-            tree.append('\t\t\t</dir>')
+    files, n_ordered = layout(iso_root)
+    for rel in files:
+        emit_file(rel, iso_root, tree, counts)
     xml = '\n'.join([
         '<?xml version="1.0" encoding="UTF-8"?>',
         '<iso_project image_name=%s cue_sheet=%s>' % (quoteattr(out + '.bin'), quoteattr(out + '.cue')),
@@ -89,8 +114,9 @@ def main():
     open(xml_path, 'w').write(xml)
     subprocess.run([MKPSXISO, '-y', '-q', '-w', xml_path], check=True)
     size = os.path.getsize(out + '.bin')
-    print('disc %s.bin/.cue: %.1f MB (%d sectors) | files: %s | license %s' % (
-        out, size / 1048576, size // 2352, ', '.join('%s %d' % kv for kv in sorted(counts.items())), os.path.basename(lic)))
+    print('disc %s.bin/.cue: %.1f MB (%d sectors) | files: %s (%d in load order) | license %s' % (
+        out, size / 1048576, size // 2352, ', '.join('%s %d' % kv for kv in sorted(counts.items())), n_ordered,
+        os.path.basename(lic)))
 
 
 if __name__ == '__main__':

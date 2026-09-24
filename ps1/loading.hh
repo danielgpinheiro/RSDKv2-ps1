@@ -25,4 +25,5 @@ extern volatile uint32_t g_ps1LoadingLoads;  // loads bracketed
 extern volatile uint32_t g_ps1LoadingShown;  // loads long enough to show the icon
 extern volatile uint32_t g_ps1LoadingTicks;  // icon frames drawn
 extern volatile uint32_t g_ps1LoadingFrame;  // icon frame drawn last (0-7)
-extern volatile uint32_t g_ps1LoadingLastUs; // duration of the last load (microseconds)
+extern volatile uint32_t g_ps1LoadingLastUs;   // duration of the last load (microseconds)
+extern volatile uint32_t g_ps1LoadingHeadroom; // heap never reached, at the end of the last load

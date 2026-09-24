@@ -7,6 +7,8 @@
 #include <psyqo/primitives/control.hh>
 #include <psyqo/primitives/sprites.hh>
 
+#include <psyqo/alloc.h>
+
 #include "gpu_chain.hh"
 #include "loading_icon.h"
 
@@ -18,8 +20,12 @@ volatile uint32_t g_ps1LoadingShown  = 0;
 volatile uint32_t g_ps1LoadingTicks  = 0;
 volatile uint32_t g_ps1LoadingFrame  = 0;
 volatile uint32_t g_ps1LoadingLastUs = 0;
-// GDB evidence aid: break on PS1LoadingDebugHook to stop right after an icon frame is drawn.
+volatile uint32_t g_ps1LoadingHeadroom = 0; // heap never reached, read at the end of the last load
+extern "C" char __heap_start, __stack_start;
+// GDB evidence aids: PS1LoadingDebugHook stops right after an icon frame is drawn,
+// PS1LoadingDoneHook at the end of every outermost load (tools/load_profile.sh).
 extern "C" __attribute__((noinline)) void PS1LoadingDebugHook(uint32_t tick) { __asm__ volatile("" ::"r"(tick)); }
+extern "C" __attribute__((noinline)) void PS1LoadingDoneHook(uint32_t us) { __asm__ volatile("" ::"r"(us)); }
 
 namespace {
 
@@ -109,6 +115,10 @@ void tick() {
 
 } // namespace
 
+void PS1FsReleaseWindows(); // cdrom_fs.cpp
+
+bool PS1LoadingActive() { return s_depth > 0; }
+
 void PS1LoadingBegin() {
     if (!g_ps1GPU)
         return;
@@ -127,7 +137,13 @@ void PS1LoadingEnd() {
     if (--s_depth > 0)
         return;
     g_ps1GPU->cancelTimer(s_timer);
+    PS1FsReleaseWindows(); // the read-ahead windows live for one load
     g_ps1LoadingLastUs = g_ps1GPU->now() - s_start;
+    uintptr_t top = (uintptr_t)psyqo_heap_end();
+    if (top < (uintptr_t)&__heap_start)
+        top = (uintptr_t)&__heap_start;
+    g_ps1LoadingHeadroom = (uint32_t)((uintptr_t)&__stack_start - top);
+    PS1LoadingDoneHook(g_ps1LoadingLastUs);
     if (s_shown) {
         g_ps1GPU->waitChainIdle();
         restoreBackground();
