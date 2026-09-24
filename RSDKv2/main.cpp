@@ -1,4 +1,8 @@
 #include "../ps1/loading.hh"
+#if PS1_MEMCARD_TEST
+#include "../ps1/memcard.hh"
+void PS1McSelfTest(); // ps1/memcard_test.cpp
+#endif
 #include "RetroEngine.hpp"
 
 #if RETRO_PLATFORM == RETRO_PS1
@@ -13,6 +17,9 @@
 #define PS1_TILE_TEST 0 // TEMP: synthetic tile-path test (Phase 2 verification)
 #define PS1_SKIP_SPRITES 0 // TEMP: skip GIF sprite decode to speed tile-test boots
 #define PS1_VIDEO_TEST 0 // TEMP: FMV Stage 3 — decode+display the first STR frame
+#ifndef PS1_MEMCARD_TEST
+#define PS1_MEMCARD_TEST 0 // `make MEMCARD_TEST=1`: memory card self-test at boot (ps1/memcard_test.cpp)
+#endif
 
 #include <psyqo/alloc.h>
 
@@ -115,6 +122,9 @@ class RSDKv2PS1App final : public psyqo::Application {
 
         g_ps1GPU = &gpu();
         m_cdrom.prepare();
+#if PS1_MEMCARD_TEST
+        PS1McPrepare(); // Nexus itself never uses the card (phase 8: generic layer for v3+)
+#endif
     }
 
     void start() override {
@@ -136,6 +146,10 @@ class RSDKv2PS1App final : public psyqo::Application {
         // every vsync (pad 1 at 60 Hz).
         m_pad.initialize(psyqo::AdvancedPad::PollingMode::Fast);
         g_ps1Pad = &m_pad;
+
+#if PS1_MEMCARD_TEST
+        PS1McSelfTest(); // then boot normally (the pad must still work: tools/memcard/selftest.sh)
+#endif
 
 #if PS1_VIDEO_TEST
         PS1VideoSelfTestInit();

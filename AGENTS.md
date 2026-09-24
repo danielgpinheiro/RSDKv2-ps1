@@ -42,6 +42,7 @@ timeout 60 /Applications/PCSX-Redux.app/Contents/MacOS/PCSX-Redux -run -fastboot
 | `RSDKv2/main.cpp` | `RSDKv2PS1App : psyqo::Application`, test switches, `Engine.RunFrame()` per frame |
 | `RSDKv2/Drawing.cpp` (PS1 block at the top, `DrawStageGfx`, `DrawSprite`, `DrawRotatedSprite`) | GPU renderer: CLUT, tile/sprite pages, chained prims |
 | `ps1/cdrom_fs.cpp` | ISO9660 walker + `FILE*` shim over `psyqo::CDRomDevice` (directory-sector cache, resident small files, 3 × 64 KB read-ahead windows during loads; counters `g_ps1FsRequests/Sectors/ReadUs`) |
+| `ps1/memcard.*` | Memory card save layer over psyqo `MemoryCardFileSystem` (payload header + CRC, Sony names, never formats). **Not used by Nexus**; compiled only for `make MEMCARD_TEST=1` (self-test `ps1/memcard_test.cpp`, run `tools/memcard/selftest.sh`: temp cards, restores `~/.config/pcsx-redux/pcsx.json`). Icons: `make mcicons` from `../Memcard icons/` |
 | `ps1/spu.*`, `ps1/xa_music.*` | SPU driver (ps1-bare-metal model) + CD-XA music Action; engine side in `RSDKv2/Audio.cpp` (PS1 branch) |
 | `ps1/mdec.cpp`, `ps1/video.cpp` | MDEC/VLC driver (psxpress port, `-O2`) + STR player: heap buffers only while open, budgeted decode-ahead for the game (`PS1VideoService/Decode`) |
 | `RSDKv2/Video.cpp`, `Sprite.cpp` `LoadRSVFile` (PS1) | `LoadVideo`/`NextVideoFrame` → `Intro.str` as a 15-bit VRAM texture surface (`vramDirect15`) |

@@ -58,6 +58,15 @@ ps1/loading.cpp \
 CPPFLAGS = -I ps1/libc -I RSDKv2
 # `make BOOT=SSZ`: skip the intro and force-load SSZ Act 1 (regression harness /
 # baselines in tools/). Default: natural boot (Retro logo -> intro FMV -> title).
+# `make MEMCARD_TEST=1`: memory card self-test at boot (phase 8, RSDKv2/main.cpp; run it with
+# tools/memcard/selftest.sh, which uses temporary card images).
+# Nexus never saves, so the card layer (ps1/memcard*.cpp) is only compiled for this test; a port
+# that saves adds ps1/memcard.cpp to SRCS.
+ifeq ($(MEMCARD_TEST),1)
+CPPFLAGS += -DPS1_MEMCARD_TEST=1
+SRCS += ps1/memcard.cpp ps1/memcard_test.cpp
+endif
+
 ifeq ($(BOOT),SSZ)
 CPPFLAGS += -DPS1_BOOT_SSZ=1
 endif
@@ -122,4 +131,8 @@ disc:
 icon:
 	/usr/bin/python3 tools/loading/build_icon.py
 
-.PHONY: bytecode atlas audio disc icon
+# Memory card icons (phase 8): ../Memcard icons/*-mc-icon.png -> ps1/memcard_icons.h (committed).
+mcicons:
+	/usr/bin/python3 tools/memcard/build_icons.py
+
+.PHONY: bytecode atlas audio disc icon mcicons
