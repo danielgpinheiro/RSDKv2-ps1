@@ -14,7 +14,7 @@ Sector format and codes from psx-spx "CDROM Sector Encoding" (cdromformat.md):
   the EDC/ECC the encoder leaves zero); no source-only file
   (build_disc.SOURCE_ONLY) on the disc; SYSTEM.CNF boots cdrom:\\PSX.EXE;1; PSX.EXE is a PS-X EXE.
 
-Usage: verify_disc.py [BIN] [ISO_ROOT] [EXE] [LICENSE]
+Usage: verify_disc.py [BIN] [ISO_ROOT] [EXE] [LICENSE|none]
   defaults: build/game.bin build/iso rsdkv2.ps-exe ../LICENSE.DAT
 Exit status 0 = everything checks out.
 """
@@ -145,8 +145,9 @@ def main():
             if not ecc_ok(s):
                 err('sector %d: Form 1 ECC' % lba)
     # License: records 0..11 = sectors 0..11 (Form 1 data at +8); sectors 12..15 zero Form 2.
-    L = open(lic, 'rb').read()
-    lic_ok = len(L) == 12 * 2336 and all(
+    no_lic = lic.lower() == 'none'
+    L = b'' if no_lic else open(lic, 'rb').read()
+    lic_ok = no_lic or len(L) == 12 * 2336 and all(
         img[i * RAW + 24:i * RAW + 24 + 2048] == L[i * 2336 + 8:i * 2336 + 8 + 2048] for i in range(12)) and all(
         img[i * RAW + 18] & 0x20 and not any(img[i * RAW + 24:i * RAW + 24 + 2324]) for i in range(12, 16))
     if not lic_ok:
@@ -212,8 +213,10 @@ def main():
         err('%s is not on the disc' % f)
     print('%s: %d sectors (%.1f MB) | Form 1 %d (EDC + ECC, %d checked) | Form 2 %d with EDC, %d without' % (
         os.path.relpath(binp, REPO), n, len(img) / 1048576, forms[0], ecc_checked, forms[1], forms[2]))
-    print('license: %s (%s) | files: %d on disc, %d compared with their sources' % (
-        'sectors 0..15 = ' + os.path.basename(lic) if lic_ok else 'MISMATCH', ' '.join(lic_text), len(files), compared))
+    print('license: %s | files: %d on disc, %d compared with their sources' % (
+        'none (emulators / modded consoles only)' if no_lic else
+        ('sectors 0..15 = %s (%s)' % (os.path.basename(lic), ' '.join(lic_text)) if lic_ok else 'MISMATCH'),
+        len(files), compared))
     for e in errors:
         print('ERROR:', e)
     print('OK' if not errors else 'FAILED (%d+ errors)' % len(errors))

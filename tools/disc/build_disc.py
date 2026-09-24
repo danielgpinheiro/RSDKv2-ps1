@@ -23,7 +23,8 @@ laid out in the order the game loads them (tools/disc/load_order.txt, from
 tools/load_profile.sh natural --order), then the other data files by path, then the streams, so
 cdrom_fs's read-ahead windows usually already hold the next file the game opens.
 
-Usage: build_disc.py [ISO_ROOT] [EXE] [LICENSE] [OUT_PREFIX]
+Usage: build_disc.py [ISO_ROOT] [EXE] [LICENSE|none] [OUT_PREFIX]
+  LICENSE none = no license data (the disc boots in emulators, on ODEs and modded consoles only)
   defaults: build/iso rsdkv2.ps-exe ../LICENSE.DAT build/game
 """
 import os, subprocess, sys
@@ -46,6 +47,9 @@ def file_type(path):
 
 ORDER = os.path.join(HERE, 'load_order.txt')
 SOURCE_ONLY = ('.gif', '.wav', '.ogg', '.raw', '.txt')
+# Fixed timestamps (volume + every entry): the image depends only on its contents, so identical
+# inputs give a byte-identical disc (published SHA-256s can be checked).
+DISC_DATE = '20260924000000'
 
 
 def excluded(rel):
@@ -83,9 +87,9 @@ def emit_file(rel, iso_root, out, counts):
     full = os.path.join(iso_root, rel)
     t = file_type(full)
     counts[t] = counts.get(t, 0) + 1
-    line = '<file name=%s type="%s" source=%s/>' % (quoteattr(parts[-1]), t, quoteattr(full))
+    line = '<file name=%s type="%s" source=%s date="%s"/>' % (quoteattr(parts[-1]), t, quoteattr(full), DISC_DATE)
     for d in reversed(parts[:-1]):
-        line = '<dir name=%s>%s</dir>' % (quoteattr(d), line)
+        line = '<dir name=%s date="%s">%s</dir>' % (quoteattr(d), DISC_DATE, line)
     out.append('\t\t\t' + line)
 
 
@@ -93,19 +97,20 @@ def main():
     args = sys.argv[1:]
     iso_root = os.path.abspath(args[0] if len(args) > 0 else os.path.join(REPO, 'build', 'iso'))
     exe = os.path.abspath(args[1] if len(args) > 1 else os.path.join(REPO, 'rsdkv2.ps-exe'))
-    lic = os.path.abspath(args[2] if len(args) > 2 else os.path.join(REPO, '..', 'LICENSE.DAT'))
+    lic = args[2] if len(args) > 2 else os.path.join(REPO, '..', 'LICENSE.DAT')
+    lic = None if lic.lower() == 'none' else os.path.abspath(lic)  # none: blank license sectors
     out = os.path.abspath(args[3] if len(args) > 3 else os.path.join(REPO, 'build', 'game'))
     work = os.path.join(os.path.dirname(out), 'disc')
     os.makedirs(work, exist_ok=True)
     cnf = os.path.join(work, 'SYSTEM.CNF')
     open(cnf, 'w', newline='').write(SYSTEM_CNF)
-    if not os.path.exists(lic):
+    if lic and not os.path.exists(lic):
         sys.exit('ERROR: license file %s not found' % lic)
 
     counts = {}
     tree = []
-    tree.append('\t\t\t<file name="SYSTEM.CNF" source=%s/>' % quoteattr(cnf))
-    tree.append('\t\t\t<file name="PSX.EXE" source=%s/>' % quoteattr(exe))
+    tree.append('\t\t\t<file name="SYSTEM.CNF" source=%s date="%s"/>' % (quoteattr(cnf), DISC_DATE))
+    tree.append('\t\t\t<file name="PSX.EXE" source=%s date="%s"/>' % (quoteattr(exe), DISC_DATE))
     files, n_ordered = layout(iso_root)
     left_out = [f for f in disc_files(iso_root) if excluded(f)]
     left_bytes = sum(os.path.getsize(os.path.join(iso_root, f)) for f in left_out)
@@ -116,8 +121,9 @@ def main():
         '<iso_project image_name=%s cue_sheet=%s>' % (quoteattr(out + '.bin'), quoteattr(out + '.cue')),
         '\t<track type="data">',
         '\t\t<identifiers system="PLAYSTATION" application="PLAYSTATION" volume="RSDKV2PS1" volume_set="RSDKV2PS1"'
-        ' publisher="RSDKV2PS1" data_preparer="MKPSXISO"/>',
-        '\t\t<license file=%s/>' % quoteattr(lic),
+        ' publisher="RSDKV2PS1" data_preparer="MKPSXISO" creation_date="%s00" modification_date="%s00"/>' % (
+            DISC_DATE, DISC_DATE),
+    ] + (['\t\t<license file=%s/>' % quoteattr(lic)] if lic else []) + [
         '\t\t<directory_tree>',
     ] + tree + [
         '\t\t</directory_tree>',
@@ -132,7 +138,7 @@ def main():
     print('disc %s.bin/.cue: %.1f MB (%d sectors) | files: %s (%d in load order) | left out %d source files '
           '(%.1f MB) | license %s' % (
         out, size / 1048576, size // 2352, ', '.join('%s %d' % kv for kv in sorted(counts.items())), n_ordered,
-        len(left_out), left_bytes / 1048576, os.path.basename(lic)))
+        len(left_out), left_bytes / 1048576, os.path.basename(lic) if lic else 'none (emulators / modded consoles only)'))
 
 
 if __name__ == '__main__':
