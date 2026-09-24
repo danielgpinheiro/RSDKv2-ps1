@@ -49,6 +49,7 @@ ps1/gpu_chain.cpp \
 ps1/cdrom_stream.cpp \
 ps1/sprite_atlas.cpp \
 ps1/spu.cpp \
+ps1/xa_music.cpp \
 
 # Engine include dir (belt-and-suspenders; quote-includes resolve relative to the .cpp anyway).
 # ps1/libc comes FIRST: its C/C++ shim headers (<string>, <cmath>, <stdio.h>, ...)
@@ -108,5 +109,11 @@ atlas: bytecode
 # Build-time audio (phase 5): Data/SoundFX/**/*.wav -> .vag (SPU-ADPCM, psxavenc).
 audio:
 	/usr/bin/python3 tools/audio/build_sfx.py build/iso/Data
+	/usr/bin/python3 tools/audio/build_music.py build/iso/Data
+	/usr/bin/python3 tools/fmv/build_str.py build/iso/Data
 
-.PHONY: bytecode atlas audio
+# Disc image (mkpsxiso BIN/CUE, MODE2 for CD-XA): build/game.bin + build/game.cue.
+disc:
+	/usr/bin/python3 tools/disc/build_disc.py
+
+.PHONY: bytecode atlas audio disc

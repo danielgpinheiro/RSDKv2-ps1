@@ -24,7 +24,7 @@ volatile uint32_t g_ps1StreamDiscarded = 0;
 
 namespace {
 
-enum class StreamState : uint8_t { IDLE, SETLOC, SETMODE, READ, READ_ACK, PAUSE, PAUSE_ACK };
+enum class StreamState : uint8_t { IDLE, SETLOC, SETFILTER, SETMODE, READ, READ_ACK, PAUSE, PAUSE_ACK };
 
 // Stream bookkeeping. m_written is advanced by the IRQ, m_consumed by the main loop.
 struct Stream {
@@ -38,6 +38,8 @@ struct Stream {
     volatile bool error        = false;
     volatile bool stopping     = false;
     bool open                  = false;
+    bool xa                    = false; // STR with XA audio: filter + XA-ADPCM, ReadS, never pause when full
+    uint8_t xaFile = 0, xaChannel = 0;
 };
 Stream s_stream;
 
@@ -61,6 +63,13 @@ class StreamAction : public psyqo::CDRomDevice::Action<StreamState> {
     bool dataReady(const psyqo::CDRomDevice::Response &) override {
         StreamState st = getState();
         bool room = (s_stream.written - s_stream.consumed) < s_stream.ringSectors;
+        if (s_stream.xa && st == StreamState::READ_ACK && !room && s_stream.written < s_stream.total && !s_stream.stopping) {
+            // XA: keep the drive (and the music) running; this sector is skipped like a late one,
+            // the reader resyncs to the next frame. It still counts toward the end of the stream.
+            g_ps1StreamDiscarded = g_ps1StreamDiscarded + 1;
+            s_stream.total = s_stream.total - 1;
+            return false;
+        }
         if (st != StreamState::READ_ACK || !room || s_stream.written >= s_stream.total) {
             // Late sector while pausing (or no room): drop it, it will be re-read after SETLOC.
             g_ps1StreamDiscarded = g_ps1StreamDiscarded + 1;
@@ -83,7 +92,7 @@ class StreamAction : public psyqo::CDRomDevice::Action<StreamState> {
         DMA_CTRL[DMA_CDROM].CHCR = 0x11000000; // burst: completes before the CPU continues
         s_stream.written = s_stream.written + 1;
         bool full = (s_stream.written - s_stream.consumed) >= s_stream.ringSectors;
-        if (full || s_stream.written >= s_stream.total || s_stream.stopping) {
+        if ((full && !s_stream.xa) || s_stream.written >= s_stream.total || s_stream.stopping) {
             setState(StreamState::PAUSE);
             psyqo::Hardware::CDRom::Command.send(psyqo::Hardware::CDRom::CDL::PAUSE);
         }
@@ -99,12 +108,23 @@ class StreamAction : public psyqo::CDRomDevice::Action<StreamState> {
     bool acknowledge(const psyqo::CDRomDevice::Response &) override {
         switch (getState()) {
             case StreamState::SETLOC:
+                if (s_stream.xa) {
+                    setState(StreamState::SETFILTER);
+                    psyqo::Hardware::CDRom::Command.send(psyqo::Hardware::CDRom::CDL::SETFILTER, s_stream.xaFile, s_stream.xaChannel);
+                    break;
+                }
                 setState(StreamState::SETMODE);
                 psyqo::Hardware::CDRom::Command.send(psyqo::Hardware::CDRom::CDL::SETMODE, 0x80); // 2x, data
                 break;
+            case StreamState::SETFILTER:
+                setState(StreamState::SETMODE);
+                // 2x | XA-ADPCM (audio sectors to the SPU) | XA filter; data sectors stay 2048 bytes
+                psyqo::Hardware::CDRom::Command.send(psyqo::Hardware::CDRom::CDL::SETMODE, 0xC8);
+                break;
             case StreamState::SETMODE:
                 setState(StreamState::READ);
-                psyqo::Hardware::CDRom::Command.send(psyqo::Hardware::CDRom::CDL::READN);
+                psyqo::Hardware::CDRom::Command.send(s_stream.xa ? psyqo::Hardware::CDRom::CDL::READS
+                                                                 : psyqo::Hardware::CDRom::CDL::READN);
                 break;
             case StreamState::READ:
                 setState(StreamState::READ_ACK);
@@ -129,9 +149,24 @@ void startRead() {
 
 } // namespace
 
+static bool openStream(uint32_t lba, uint32_t totalSectors, uint8_t *ring, uint32_t ringSectors, bool xa, uint8_t xaFile,
+                       uint8_t xaChannel);
+
+bool PS1StreamOpenXA(uint32_t lba, uint32_t totalSectors, uint8_t *ring, uint32_t ringSectors, uint8_t xaFile, uint8_t xaChannel) {
+    return openStream(lba, totalSectors, ring, ringSectors, true, xaFile, xaChannel);
+}
+
 bool PS1StreamOpen(uint32_t lba, uint32_t totalSectors, uint8_t *ring, uint32_t ringSectors) {
+    return openStream(lba, totalSectors, ring, ringSectors, false, 0, 0);
+}
+
+static bool openStream(uint32_t lba, uint32_t totalSectors, uint8_t *ring, uint32_t ringSectors, bool xa, uint8_t xaFile,
+                       uint8_t xaChannel) {
     if (!g_ps1CDRom || s_stream.running || !ring || !ringSectors)
         return false;
+    s_stream.xa        = xa;
+    s_stream.xaFile    = xaFile;
+    s_stream.xaChannel = xaChannel;
     s_stream.ring        = ring;
     s_stream.ringSectors = ringSectors;
     s_stream.startLBA    = lba;

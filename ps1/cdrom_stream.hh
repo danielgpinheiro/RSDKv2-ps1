@@ -22,6 +22,11 @@
 
 // ring: ringSectors * 2048 bytes, word-aligned, owned by the caller.
 bool     PS1StreamOpen(uint32_t lba, uint32_t totalSectors, uint8_t *ring, uint32_t ringSectors);
+// STR with interleaved XA audio (phase 5): Setfilter(xaFile, xaChannel) + Setmode 2x | XA-ADPCM |
+// filter + ReadS. Audio sectors go to the drive's decoder (never to the CPU); totalSectors counts
+// the data (video) sectors only. The drive is never paused on purpose (the audio would stop):
+// when the ring is full the newest sector is dropped and the reader resyncs to the next frame.
+bool     PS1StreamOpenXA(uint32_t lba, uint32_t totalSectors, uint8_t *ring, uint32_t ringSectors, uint8_t xaFile, uint8_t xaChannel);
 void     PS1StreamPump();                 // call every frame: restarts reading when the ring has room
 uint32_t PS1StreamAvailable();            // sectors ready to consume
 const uint8_t *PS1StreamSector(uint32_t i); // i-th ready sector (0 = oldest), valid until consumed

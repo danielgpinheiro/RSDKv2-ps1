@@ -89,7 +89,7 @@ static bool nameMatchesBounded(const char *name, int nameLen, const uint8_t *ent
 
 /* Find a file by a nested path (e.g. "Data/Stages/SSZ/Act1.bin"), walking the
  * ISO9660 directory tree. Fills lba/size. Returns false if not found. */
-static bool findFile(const char *path, uint32_t *outLba, uint32_t *outSize) {
+static bool findEntry(const char *path, uint32_t *outLba, uint32_t *outSize, bool wantDir) {
     if (!readSector(16)) /* Primary Volume Descriptor */
         return false;
     /* Root directory record is at PVD offset 156. */
@@ -132,7 +132,7 @@ static bool findFile(const char *path, uint32_t *outLba, uint32_t *outSize) {
                     uint8_t  flags = q[25];
                     bool     isDir = (flags & 2) != 0;
                     if (last) {
-                        if (isDir) return false; /* expecting a file */
+                        if (isDir != wantDir) return false; /* file vs directory */
                         *outLba = lba; *outSize = sz;
                         return true;
                     }
@@ -151,6 +151,69 @@ static bool findFile(const char *path, uint32_t *outLba, uint32_t *outSize) {
     }
 }
 
+static bool findFile(const char *path, uint32_t *outLba, uint32_t *outSize) { return findEntry(path, outLba, outSize, false); }
+static bool findDir(const char *path, uint32_t *outLba, uint32_t *outSize) { return findEntry(path, outLba, outSize, true); }
+
+bool PS1FsFind(const char *path, uint32_t *lba, uint32_t *size) { return findFile(path, lba, size); }
+
+bool PS1XaStopForFileRead(); // xa_music.cpp
+
+/* Resident files: small files the scripts read during play (LoadPalette), preloaded into RAM
+ * so reading them never touches the drive, which may be streaming CD-XA music. */
+#define RESIDENT_MAX 16
+struct Resident {
+    char path[48];
+    uint8_t *data;
+    uint32_t size;
+};
+static Resident s_resident[RESIDENT_MAX];
+static int s_residentCount = 0;
+volatile uint32_t g_ps1FsResidentReads = 0; // fopen served from RAM (GDB)
+
+static bool pathEq(const char *a, const char *b) {
+    for (; *a && *b; ++a, ++b) {
+        char x = (*a >= 'A' && *a <= 'Z') ? *a + 32 : *a;
+        char y = (*b >= 'A' && *b <= 'Z') ? *b + 32 : *b;
+        if (x != y)
+            return false;
+    }
+    return *a == *b;
+}
+
+/* Preload every file of `dir` (e.g. "Data/Palettes") up to maxSize bytes. Returns the count. */
+int PS1FsPreloadDir(const char *dir, uint32_t maxSize) {
+    uint32_t dirLba, dirSize;
+    if (!findDir(dir, &dirLba, &dirSize))
+        return 0;
+    int loaded = 0;
+    for (uint32_t off = 0; off < dirSize; off += ISO_SECTOR) {
+        if (!readSector(dirLba + off / ISO_SECTOR))
+            break;
+        static uint8_t sec[ISO_SECTOR]; // s_sec may be evicted by nested reads; not on the stack (2 KB)
+        memcpy(sec, s_sec, ISO_SECTOR);
+        for (const uint8_t *q = sec; q < sec + ISO_SECTOR && q[0];) {
+            uint8_t recLen = q[0], nlen = q[32];
+            uint32_t lba = le32(q + 2), sz = le32(q + 10);
+            bool isDir = (q[25] & 2) != 0;
+            if (!isDir && nlen > 1 && sz <= maxSize && s_residentCount < RESIDENT_MAX) {
+                Resident &r = s_resident[s_residentCount];
+                int n = snprintf(r.path, sizeof(r.path), "%s/", dir);
+                for (int i = 0; i < nlen && q[33 + i] != ';' && n < (int)sizeof(r.path) - 1; ++i) r.path[n++] = (char)q[33 + i];
+                r.path[n] = 0;
+                uint32_t secs = (sz + ISO_SECTOR - 1) / ISO_SECTOR;
+                r.data        = (uint8_t *)malloc(secs * ISO_SECTOR);
+                if (r.data && g_ps1CDRom->readSectorsBlocking(lba, secs, r.data, *g_ps1GPU)) {
+                    r.size = sz;
+                    ++s_residentCount;
+                    ++loaded;
+                }
+            }
+            q += recLen;
+        }
+    }
+    return loaded;
+}
+
 FILE *fopen(const char *path, const char *mode) {
     (void)mode;
     uint32_t lba, size;
@@ -163,6 +226,23 @@ FILE *fopen(const char *path, const char *mode) {
         g_ps1VideoForcedClose = g_ps1VideoForcedClose + 1;
         PS1VideoClose();
     }
+    for (int i = 0; i < s_residentCount; ++i) {
+        if (pathEq(s_resident[i].path, path)) {
+            FILE *f = (FILE *)malloc(sizeof(FILE));
+            if (!f)
+                return nullptr;
+            f->lba   = 0;
+            f->size  = s_resident[i].size;
+            f->pos   = 0;
+            f->valid = 1;
+            f->mem   = s_resident[i].data;
+            g_ps1FsResidentReads = g_ps1FsResidentReads + 1;
+            return f;
+        }
+    }
+    // One CD action at a time: CD-XA music reads continuously; scripts stop it before loads,
+    // this is the safety net (counted in g_ps1XaForcedStops).
+    PS1XaStopForFileRead();
     if (!findFile(path, &lba, &size))
         return nullptr;
     FILE *f = (FILE *)malloc(sizeof(FILE));
@@ -172,6 +252,7 @@ FILE *fopen(const char *path, const char *mode) {
     f->size  = size;
     f->pos   = 0;
     f->valid = 1;
+    f->mem   = nullptr;
     return f;
 }
 
@@ -193,6 +274,11 @@ size_t fread(void *ptr, size_t size, size_t nmemb, FILE *f) {
 
     uint8_t *dst       = (uint8_t *)ptr;
     size_t   remaining = want;
+    if (f->mem) {
+        memcpy(dst, f->mem + f->pos, remaining);
+        f->pos += (uint32_t)remaining;
+        return want / size;
+    }
     while (remaining > 0) {
         uint32_t sector     = f->lba + (f->pos / ISO_SECTOR);
         uint32_t off        = f->pos % ISO_SECTOR;

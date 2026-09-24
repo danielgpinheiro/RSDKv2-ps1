@@ -4,6 +4,8 @@
 #include <iostream>
 #else
 #include "../ps1/spu.hh"
+#include "../ps1/xa_music.hh"
+int PS1FsPreloadDir(const char *dir, uint32_t maxSize); // cdrom_fs.cpp
 #endif
 
 int NoGlobalSFX = 0;
@@ -95,9 +97,20 @@ void PS1SpuDebugService() {
     }
 }
 
+volatile int32_t g_ps1MusicTestPlay = -1; // GDB test hook: >= 0 -> PlayMusic(n) next frame, like a script
 void PS1AudioUpdate() {
     if (!audioEnabled)
         return;
+    if (g_ps1MusicTestPlay >= 0) {
+        PlayMusic(g_ps1MusicTestPlay);
+        g_ps1MusicTestPlay = -1;
+    }
+    // Music: PC gain bgmVolume * MusicVolume (script fades) on the SPU CD input (0x7FFF = 1.0);
+    // a non-looping track that reached its end stops like the PC stream at end of file.
+    if (musicStatus == MUSIC_PLAYING && PS1XaEnded())
+        musicStatus = MUSIC_STOPPED;
+    int cdVol = musicStatus == MUSIC_PLAYING ? 0x7fff * bgmVolume / MAX_VOLUME * MusicVolume / MAX_VOLUME : 0;
+    PS1SpuSetCdVolume((uint16_t)cdVol, (uint16_t)cdVol);
     // PC frees a channel (StopSfx of its sfx) when its sample runs out; on the SPU the voice's
     // envelope drops to 0 at the sample's end block.
     for (int c = 0; c < CHANNEL_COUNT; ++c) {
@@ -146,6 +159,10 @@ int InitSoundDevice()
 #if RETRO_PLATFORM == RETRO_PS1
     PS1SpuInit();
     audioEnabled = true;
+    musicEnabled = PS1XaInit(); // Data/Music/Music.xa (CD-XA): the drive decodes, the SPU mixes
+    // Scripts load palettes during play (TitleCard's BShieldTint.act): keep them in RAM so those
+    // reads never stop the CD-XA music (one CD action at a time).
+    PS1FsPreloadDir("Data/Palettes", 4096);
 #endif
     LoadGlobalSfx();
 #if RETRO_PLATFORM == RETRO_PS1
@@ -532,10 +549,40 @@ void LoadMusic(void *userdata)
     }
 }
 #else
+// PS1: the track is one channel of Data/Music/Music.xa (tools/audio/build_music.py), played by
+// the CD drive (ps1/xa_music). Same state changes as the PC LoadMusic; a track that isn't on the
+// disc (Boss.ogg, OneUp.ogg) behaves like a failed LoadFile2: the old music stops, nothing plays.
+void PS1MusicStop() { PS1XaStop(); }
+void PS1MusicPause(bool pause)
+{
+    if (pause)
+        PS1XaPause();
+    else
+        PS1XaResume();
+}
+
 void LoadMusic(void *userdata)
 {
     (void)userdata;
-    StopMusic();
+    if (trackBuffer < 0 || trackBuffer >= TRACK_COUNT || !musicTracks[trackBuffer].fileName[0]) {
+        StopMusic();
+        return;
+    }
+    if (musInfo.loaded)
+        StopMusic();
+    int channel = PS1XaFindTrack(musicTracks[trackBuffer].fileName);
+    if (channel < 0 || !musicEnabled)
+        return;
+    // The intro music is interleaved in Intro.str: the video stream (LoadVideo, same frame) plays
+    // it; here only the music state and volume, like PC.
+    if (channel != PS1_XA_IN_VIDEO)
+        PS1XaPlay(channel, musicTracks[trackBuffer].trackLoop);
+    musInfo.loaded    = true;
+    musInfo.trackLoop = musicTracks[trackBuffer].trackLoop;
+    musicStatus       = MUSIC_PLAYING;
+    MusicVolume       = MAX_VOLUME;
+    CurrentMusicTrack = trackBuffer;
+    trackBuffer       = -1;
 }
 #endif
 

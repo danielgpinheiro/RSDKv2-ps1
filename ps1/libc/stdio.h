@@ -24,6 +24,7 @@ typedef struct _FILE {
     uint32_t size;  /* file size in bytes */
     uint32_t pos;   /* current byte offset */
     int      valid; /* nonzero while open */
+    const uint8_t *mem; /* resident file (cdrom_fs PS1FsPreloadDir): served from RAM, no CD access */
 } FILE;
 
 #define SEEK_SET 0

@@ -56,6 +56,7 @@ static VLC_Context s_vlcCtx;
 static int s_width = 256;
 static int s_height = 160;
 static int s_frameCount = 0;
+static bool s_xa        = false; // STR with interleaved XA audio (sidecar .sti): never pauses, drops unrequested frames
 static int s_nextFrame  = 1; // STR frame numbers are 1-based
 static int s_requested  = 0; // frames asked for by the game, not decoded yet
 // Game-side decode pipeline state (see PS1VideoService).
@@ -112,7 +113,41 @@ static bool allocBuffers() {
     return true;
 }
 
+// Build-time sidecar next to an STR with XA audio (tools/fmv/build_str.py): X.str -> X.sti =
+// 'STRI', u32 frames, u32 video (data) sectors, u8 xa file, u8 xa channel, u8 has audio, u8 0.
+struct StrInfo {
+    uint32_t frames = 0, videoSectors = 0;
+    uint8_t xaFile = 0, xaChannel = 0;
+    bool audio = false;
+};
+static bool readStrInfo(const char *path, StrInfo *info) {
+    char sti[96];
+    int n = (int)strlen(path);
+    if (n < 4 || n >= (int)sizeof(sti))
+        return false;
+    memcpy(sti, path, n + 1);
+    memcpy(sti + n - 3, "sti", 3);
+    FILE *f = fopen(sti, "rb");
+    if (!f)
+        return false;
+    uint8_t b[16];
+    bool ok = fread(b, 1, 16, f) == 16 && !memcmp(b, "STRI", 4);
+    fclose(f);
+    if (!ok)
+        return false;
+    info->frames       = b[4] | (b[5] << 8) | (b[6] << 16) | ((uint32_t)b[7] << 24);
+    info->videoSectors = b[8] | (b[9] << 8) | (b[10] << 16) | ((uint32_t)b[11] << 24);
+    info->xaFile       = b[12];
+    info->xaChannel    = b[13];
+    info->audio        = b[14] != 0;
+    return true;
+}
+
+volatile uint32_t g_ps1VideoXa = 0; // 1 while an STR with XA audio streams (GDB)
+
 bool PS1VideoOpen(const char *path) {
+    StrInfo info;
+    bool hasInfo = readStrInfo(path, &info);
     s_str = fopen(path, "rb");
     if (!s_str)
         return false;
@@ -123,6 +158,10 @@ bool PS1VideoOpen(const char *path) {
     }
     uint32_t sectors = s_str->size / ISO_SECTOR;
     s_frameCount = (int)(sectors / STR_SECTORS_PER_FRAME);
+    s_xa         = hasInfo && info.audio;
+    if (hasInfo)
+        s_frameCount = (int)info.frames;
+    g_ps1VideoXa = s_xa ? 1 : 0;
     s_nextFrame  = 1;
     s_requested  = 0;
     s_stage      = STAGE_EMPTY;
@@ -131,6 +170,8 @@ bool PS1VideoOpen(const char *path) {
     // Geometry is fixed by the encoder (psxavenc -s 256x160).
     s_width  = 256;
     s_height = 160;
+    if (s_xa) // the intro music: XA sectors interleaved in the STR, played by the drive
+        return PS1StreamOpenXA(s_str->lba, info.videoSectors, s_ring, STR_RING_SECTORS, info.xaFile, info.xaChannel);
     return PS1StreamOpen(s_str->lba, sectors, s_ring, STR_RING_SECTORS);
 }
 
@@ -154,11 +195,18 @@ static int fetchFrame() {
         PS1StreamConsume(1);
         g_ps1VideoResync = g_ps1VideoResync + 1;
     }
-    if (PS1StreamAvailable() < STR_SECTORS_PER_FRAME)
+    // Sectors of this frame: 10 in a video-only STR, 8-9 when XA audio takes 1 sector in 8.
+    int frameSectors = PS1StreamAvailable() ? hdr(0)->sectorCount : STR_SECTORS_PER_FRAME;
+    if (frameSectors < 1 || frameSectors > STR_SECTORS_PER_FRAME) {
+        PS1StreamConsume(1);
+        g_ps1VideoResync = g_ps1VideoResync + 1;
+        return 0;
+    }
+    if (PS1StreamAvailable() < (uint32_t)frameSectors)
         return PS1StreamEnded() ? -1 : 0; // still reading — keep showing the current frame
 
-    // All 10 sectors must belong to this frame, in order.
-    for (int i = 0; i < STR_SECTORS_PER_FRAME; i++) {
+    // All sectors must belong to this frame, in order.
+    for (int i = 0; i < frameSectors; i++) {
         const StrSectorHeader *h = hdr(i);
         if (h->magic != STR_MAGIC || h->sectorIndex != i || (int)h->frame != s_nextFrame) {
             PS1StreamConsume(1); // drop the bad head and resync next time
@@ -168,9 +216,9 @@ static int fetchFrame() {
     }
 
     // Strip the 32-byte sector headers: 2016 payload bytes per sector.
-    for (int i = 0; i < STR_SECTORS_PER_FRAME; i++)
+    for (int i = 0; i < frameSectors; i++)
         memcpy(s_bs + i * STR_BS_CHUNK, PS1StreamSector(i) + 32, STR_BS_CHUNK);
-    PS1StreamConsume(STR_SECTORS_PER_FRAME);
+    PS1StreamConsume(frameSectors);
     PS1StreamPump();
 
     // RLE size of this frame (BS header mdec0 low 16 bits) + the MDEC(1) command word.
@@ -213,6 +261,8 @@ int PS1VideoNextFrame() {
 
 void PS1VideoClose() {
     PS1StreamClose();
+    s_xa         = false;
+    g_ps1VideoXa = 0;
     if (s_str) {
         fclose(s_str);
         s_str = nullptr;
@@ -284,13 +334,15 @@ static int vlcChunk() {
 // game isn't asking (the intro's fade-in shows frame 1 for ~4 s), pausing is intended.
 #define RING_DROP_SECTORS (STR_RING_SECTORS - 4) // ~1.6 game frames of margin at 2.5 sectors/frame
 
+// With XA audio the stream never pauses (the music would stop), so frames are dropped whether
+// the game is asking or not: the video follows the stream, which runs in real time like the music.
 static void relieveRing() {
-    if (s_requested == 0)
+    if (s_requested == 0 && !s_xa)
         return;
     while (PS1StreamAvailable() >= RING_DROP_SECTORS) {
         const StrSectorHeader *h = hdr(0);
-        if (h->magic == STR_MAGIC && h->sectorIndex == 0) {
-            PS1StreamConsume(STR_SECTORS_PER_FRAME); // fetchFrame's resync accepts the next one
+        if (h->magic == STR_MAGIC && h->sectorIndex == 0 && h->sectorCount >= 1 && h->sectorCount <= STR_SECTORS_PER_FRAME) {
+            PS1StreamConsume(h->sectorCount); // fetchFrame's resync accepts the next one
             g_ps1VideoDropped = g_ps1VideoDropped + 1;
         } else {
             PS1StreamConsume(1);
@@ -302,6 +354,12 @@ static void relieveRing() {
 int PS1VideoService() {
     if (!s_str)
         return -1;
+    // An STR with audio plays at stream speed, like a real FMV player: every decoded frame is
+    // shown as soon as it's ready, so the picture follows the stream (and its music) instead of
+    // the script's NextVideoFrame cadence; ring pressure drops stale frames. Video-only STRs stay
+    // paced by the script (PC semantics).
+    if (s_xa && s_requested == 0)
+        s_requested = 1;
     PS1StreamPump(); // keep reading ahead even between requests
     relieveRing();
     if (s_pixReady && s_requested > 0) {
@@ -309,8 +367,8 @@ int PS1VideoService() {
         s_pixReady = false;
         return 1; // the caller uploads s_video now, then calls PS1VideoDecode()
     }
-    if (s_requested > 0)
-        g_ps1VideoLate = g_ps1VideoLate + 1; // the game is waiting for a frame
+    if (s_requested > 0 && !s_xa)
+        g_ps1VideoLate = g_ps1VideoLate + 1; // the game is waiting for a frame (script-paced STRs)
     return 0;
 }
 

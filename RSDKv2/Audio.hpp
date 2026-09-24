@@ -135,6 +135,10 @@ inline void freeMusInfo()
     }
 }
 #else
+#if RETRO_PLATFORM == RETRO_PS1
+void PS1MusicStop(); // stops the CD-XA track (xa_music)
+void PS1MusicPause(bool pause);
+#endif
 inline void ProcessMusicStream() {}
 inline void ProcessAudioPlayback() {}
 inline void ProcessAudioMixing() {}
@@ -151,6 +155,9 @@ inline void freeMusInfo()
         musInfo.trackLoop = false;
         musInfo.loaded    = false;
         musicStatus       = MUSIC_STOPPED;
+#if RETRO_PLATFORM == RETRO_PS1
+        PS1MusicStop();
+#endif
 
         SDL_UnlockAudio();
     }
@@ -201,14 +208,22 @@ inline void SetMusicVolume(int volume)
 
 inline void PauseSound()
 {
-    if (musicStatus == MUSIC_PLAYING)
+    if (musicStatus == MUSIC_PLAYING) {
         musicStatus = MUSIC_PAUSED;
+#if RETRO_PLATFORM == RETRO_PS1
+        PS1MusicPause(true);
+#endif
+    }
 }
 
 inline void ResumeSound()
 {
-    if (musicStatus == MUSIC_PAUSED)
+    if (musicStatus == MUSIC_PAUSED) {
         musicStatus = MUSIC_PLAYING;
+#if RETRO_PLATFORM == RETRO_PS1
+        PS1MusicPause(false);
+#endif
+    }
 }
 
 
