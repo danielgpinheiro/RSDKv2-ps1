@@ -57,11 +57,16 @@ timeout 60 /Applications/PCSX-Redux.app/Contents/MacOS/PCSX-Redux -run -fastboot
   `#define` (`TILE_COUNT 0x400`, `TILELAYER_CHUNK_W 0x100`, `TILELAYER_CHUNK_H 0x10`,
   `CHUNKTILE_COUNT 0x200*64`, `LAYER_COUNT 4`, `GFXDATA_MAX 0x10` (stub), `SCRIPTDATA_COUNT 0x8000`).
 - **VRAM map**: FB at (0,0) and (0,256) 320×240; master CLUT at (0,240); 4-bit atlas CLUTs in
-  rows 240–255 / 496–511 under the FBs; sprite atlas columns pageX 5–8 and 13–15 (per-stage
-  `.atl`, the FMV page reserved in NIntro); tile pages pageX 9/11 × pageY 0/1.
+  rows 240–255 / 496–503 under the FBs; rows 504–511 = runtime blend/tint-mask CLUTs; sprite
+  atlas columns pageX 5–8 and 13–15 (per-stage `.atl`, the FMV page reserved in NIntro), BG
+  line strips (`BGStrips.bin`) in what the atlas leaves free; tile pages pageX 9/11 × pageY 0/1.
 - **CLUT index 0 = transparent (0x0000); visible black = 0x8000.** Sprites use modulation
   colour 0x80 (not raw mode).
 - **Golden rule**: no runtime GIF/LZW/script parsing. Add a build step instead.
+- **Tile layers follow PC `DrawHLineScrollLayer`** (planes, flips, per-line scroll; the scroll
+  state update `SetupHLineScrollLayer` is shared with PC — it is game state). BG lines come
+  from build-time strips (`make atlas` runs `tools/bgstrips`); check changes with
+  `tools/layer_capture.sh` + `tools/layer_ref.py` (pixel-exact).
 - **Sprites = per-stage atlas** (`make atlas`, `ps1/sprite_atlas.*`): sheets are registered by
   name and bound at each atlas load; a new/changed script, sheet or `.ani` needs `make atlas`
   (the builder fails if a stage doesn't fit or a frame doesn't decode back exactly). Anything
@@ -78,6 +83,8 @@ timeout 60 /Applications/PCSX-Redux.app/Contents/MacOS/PCSX-Redux -run -fastboot
   must be reset per stage: test the menu flow, not only `BOOT=SSZ`.
 - **One CD action at a time**: stop the FMV (`PS1StopVideo`) before any file read; stage
   loads already do.
+- `ps1/libc` maths is ours (soft-float): `sinf` once filled the trig tables with garbage.
+  Compare shim results with PC values when touching it.
 - Verify with `tools/run_test.sh` (60 fps = `PERF last=1`, `CHAIN overflow=0`) and
   `tools/frame_capture.sh 41` against `tools/baseline/ssz_f41_vram.bin` (both on a `BOOT=SSZ` build).
   Intro/FMV checks: natural build, checkpoints listed in `../docs/20` (verification tools).

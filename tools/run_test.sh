@@ -9,9 +9,9 @@ pkill -f PCSX-Redux 2>/dev/null; sleep 1
 $PCSX -run -fastboot -interpreter -debugger -gdb -gdb-port 3333 -webserver \
       -iso build/game.iso -exe rsdkv2.ps-exe -stdout -logfile "$OUT.log" >/dev/null 2>&1 &
 sleep "$BOOT"
-timeout 20 $GDB --batch -x tools/perf.gdb 2>/dev/null | grep -E "PERF|CHAIN"
+timeout 20 $GDB --batch -x tools/perf.gdb 2>/dev/null | grep -E "PERF|CHAIN|CPU"
 sleep "$WIN"
-timeout 20 $GDB --batch -x tools/perf.gdb 2>/dev/null | grep -E "PERF|CHAIN"
+timeout 20 $GDB --batch -x tools/perf.gdb 2>/dev/null | grep -E "PERF|CHAIN|CPU"
 python3 tools/vramshot.py "$OUT" $BASE
 pkill -f PCSX-Redux
 grep -a "RSDKv2-PS1" "$OUT.log" | tail -5
