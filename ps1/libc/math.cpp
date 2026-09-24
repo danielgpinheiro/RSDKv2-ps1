@@ -32,9 +32,19 @@ double fmod(double x, double y) {
     return x - t * y;
 }
 
-/* Taylor series, reduced to [-pi, pi]. 6 terms -> ~1e-7 for |x|<=pi. */
+/* Taylor series on [-pi/2, pi/2] (6 terms: error < 1e-7). fmodf alone leaves x in
+ * (-2pi, 2pi), where the series diverges (it filled SinValue512/CosValue512 with garbage
+ * past ~2.5 rad until phase 3c): fold to [-pi, pi], then sin(pi - x) = sin(x). */
 float sinf(float x) {
     x = fmodf(x, TWO_PI_);
+    if (x > PI_)
+        x -= TWO_PI_;
+    else if (x < -PI_)
+        x += TWO_PI_;
+    if (x > HALF_PI_)
+        x = PI_ - x;
+    else if (x < -HALF_PI_)
+        x = -PI_ - x;
     float x2   = x * x;
     float term = x, sum = x;
     term *= -x2 / 6.0f;
