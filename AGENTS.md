@@ -26,7 +26,9 @@ make -j8                                   # rsdkv2.ps-exe, rsdkv2.elf, rsdkv2.m
 mipsel-none-elf-size rsdkv2.elf            # must fit retail 2 MB
 make atlas audio                           # build-time assets (after data/script changes)
 make disc                                  # mkpsxiso -> build/game.bin + build/game.cue (MODE2, XA)
-                                           #   files in load order (tools/disc/load_order.txt)
+                                           #   files in load order (tools/disc/load_order.txt), PC sources
+                                           #   left off, then tools/disc/verify_disc.py (EDC/ECC, license, files)
+make dist                                  # build/dist/SonicNexus-PS1.bin/.cue + SHA256SUMS (normal build only)
 tools/load_profile.sh ssz|natural LOG      # per-load / per-file CD request profile (--order regenerates the layout)
 timeout 60 /Applications/PCSX-Redux.app/Contents/MacOS/PCSX-Redux -run -fastboot \
   -iso build/game.cue -exe rsdkv2.ps-exe -stdout -logfile /tmp/rsdkv2.log &
@@ -52,7 +54,7 @@ timeout 60 /Applications/PCSX-Redux.app/Contents/MacOS/PCSX-Redux -run -fastboot
 | `ps1/libc/` | Freestanding libc/C++ shims (EASTL-backed `std::`), must stay first on `-I` |
 | `*.py` (root) | Build-time asset pipeline (`extract_loose`, `convert_tiles`, `convert_fmv`); `make bytecode` runs `tools/rsdkscript`, `make atlas` also `tools/atlas/build_atlas.py` |
 | `ps1/sprite_atlas.*` | per-stage sprite atlas loader (tables + VRAM blocks from `Data/Sprites/Atlas/<Stage>.atl`) |
-| `build/iso/` | ISO root = the disc: `Data/**` loose assets + `PSX.EXE` only |
+| `build/iso/` | Asset tree (`Data/**`): the disc minus the PC source files (`.gif .wav .ogg .raw .txt`), which the tools read and `build_disc.py` leaves off |
 | `build/fmv-src/`, `build/Data.bin.*` | build inputs kept off the disc (`Intro.rsv`, reference `.mdec`, datapack backups) |
 | `.hermes/plans/` | Previous agent's plans (gitignored, useful history) |
 
