@@ -48,11 +48,31 @@ int PS1ChainReserveRow(int count, int16_t x, int16_t y, uint16_t **chunkData, ui
 void PS1ChainTPage(psyqo::PrimPieces::TPageAttr attr);         // skipped if identical to the last one
 void PS1ChainInvalidateTPage();                                // GPU texpage state unknown
 void PS1ChainSprite16(const psyqo::Prim::Sprite16x16 &s);      // batched (tiles)
+// Fast tile path: a Sprite16x16 from its raw words (colour 0x80, xy = x | y << 16, tex = u | v << 8 | clut << 16).
+void PS1ChainSprite16Raw(uint32_t xy, uint32_t tex);
 void PS1ChainSprite(const psyqo::Prim::Sprite &s);
 void PS1ChainQuad(const psyqo::Prim::TexturedQuad &q);         // note: quads carry their own texpage
 void PS1ChainRect(const psyqo::Prim::Rectangle &r);            // untextured; semi-trans uses the current texpage mode
+
+// Replay (phase 3c partial tint): PS1ChainMark() closes the open batch and returns the arena
+// position of the next fragment; PS1ChainReplay(from, to) re-chains copies of the fragments
+// linked from `from` up to (not including) `to`, skipping CPU->VRAM uploads. Returns words used.
+uint32_t *PS1ChainMark();
+int PS1ChainReplay(uint32_t *from, uint32_t *to);
+// Drawing area (GP0 E3h/E4h) in screen coordinates of the buffer this frame draws into;
+// Reset restores the whole 320x240 buffer. Mask control = GP0 E6h (psx-spx "Mask Bit Setting").
+void PS1ChainDrawArea(int x0, int y0, int x1, int y1);
+void PS1ChainDrawAreaReset();
+void PS1ChainMaskControl(bool forceSet, bool test);
+// One-shot hook, run before the next primitive/upload is chained (or by PS1ChainRunHook()).
+void PS1ChainSetHook(void (*fn)());
+void PS1ChainRunHook();
 
 // Debug/verification counters (read with GDB).
 extern volatile uint32_t g_ps1ChainOverflow;  // primitives dropped because the arena was full
 extern volatile uint32_t g_ps1ChainHighWater; // max arena words used in one frame
 extern volatile uint32_t g_ps1ChainLastWords; // arena words used by the last frame
+extern volatile uint32_t g_ps1ChainReplayWords; // words re-chained by PS1ChainReplay this frame
+// Verification aid: while true, Sprite16/Sprite/Quad/Rect are dropped (CLUT uploads, clears
+// and texpages still go through). Drawing.cpp sets it around object lists for layers-only frames.
+extern bool g_ps1ChainSkipPrims;

@@ -126,7 +126,7 @@ struct LineScroll {
 };
 
 struct Tiles128x128 {
-    int gfxDataPos[CHUNKTILE_COUNT];
+    int gfxDataPos[CHUNKTILE_COUNT]; // PS1: the tile's packed GPU "visual word" (PS1TileVisual, Drawing.cpp)
     ushort tileIndex[CHUNKTILE_COUNT];
     byte direction[CHUNKTILE_COUNT];
     byte visualPlane[CHUNKTILE_COUNT];

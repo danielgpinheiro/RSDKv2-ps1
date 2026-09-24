@@ -38,9 +38,10 @@ COLUMNS = [5, 6, 7, 8, 13, 14, 15]
 PAIRS = [(5, 6), (7, 8), (13, 14)]
 FMV_RESERVED = {(5, 1), (6, 1), (7, 1), (8, 1)}  # (column, pageY) -> 15-bit video page
 FMV_XY = (320, 256)
-# 4-bit CLUT slots (16 halfwords): row 240 right of the master CLUT, rows 241-255 and 496-511
+# 4-bit CLUT slots (16 halfwords): row 240 right of the master CLUT, rows 241-255 and 496-503
+# (rows 504-511 hold the runtime INK_BLEND CLUTs, Drawing.cpp PS1_BLEND_*)
 CLUT_SLOTS = [(x, 240) for x in range(256, 320, 16)] + \
-             [(x, y) for y in list(range(241, 256)) + list(range(496, 512)) for x in range(0, 320, 16)]
+             [(x, y) for y in list(range(241, 256)) + list(range(496, 504)) for x in range(0, 320, 16)]
 
 
 class AtlasError(Exception):

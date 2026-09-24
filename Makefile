@@ -83,6 +83,7 @@ LDFLAGS   += -Wl,-wrap,memcpy -Wl,-wrap,memset
 # The FMV Huffman (VLC) decoder is the hot loop of video playback: optimise it for speed.
 # Target-specific CPPFLAGS land after the global -Os (make's C++ rule: CXXFLAGS CPPFLAGS).
 ps1/mdec.o: CPPFLAGS += -O2
+RSDKv2/Drawing.o: CPPFLAGS += -O2
 
 # Cancel make's built-in `%: %.o` link rule. Without this, the extensionless libc shim
 # headers (ps1/libc/string, vector, ...) listed in .dep files are treated as targets and
@@ -101,5 +102,6 @@ bytecode:
 # system python): every frame a stage can draw, packed 4/8-bit into VRAM pages + CLUT maps.
 atlas: bytecode
 	/usr/bin/python3 tools/atlas/build_atlas.py build/iso/Data build/manifest
+	/usr/bin/python3 tools/bgstrips/build_bgstrips.py build/iso/Data
 
 .PHONY: bytecode atlas

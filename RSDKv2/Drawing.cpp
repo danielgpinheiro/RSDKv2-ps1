@@ -23,6 +23,45 @@ int GfxDataPosition;
 GFXSurface GfxSurface[SURFACE_MAX];
 byte GraphicData[GFXDATA_MAX];
 
+// DrawHLineScrollLayer's scroll-state update, shared by the PC rasteriser and the PS1 GPU path:
+// advances the BG layer autoscroll and the HParallax line positions exactly like PC (this is
+// game state as well as visuals) and returns the layer's Y scroll offset in pixels.
+static int SetupHLineScrollLayer(int layerID) {
+    TileLayer *layer = &StageLayouts[activeTileLayers[layerID]];
+    int layerwidth   = layer->xsize;
+    int yscrollOffset = 0;
+    if (activeTileLayers[layerID]) { // BG Layer
+        int yScroll    = YScrollOffset * layer->parallaxFactor >> 6;
+        int fullheight = layer->ysize << 7;
+        layer->scrollPos += layer->scrollSpeed;
+        if (layer->scrollPos > fullheight << 16)
+            layer->scrollPos -= fullheight << 16;
+        yscrollOffset = (yScroll + (layer->scrollPos >> 16)) % fullheight;
+    } else { // FG Layer
+        LastXSize     = layer->xsize;
+        yscrollOffset = YScrollOffset;
+        for (int i = 0; i < PARALLAX_COUNT; ++i) HParallax.linePos[i] = XScrollOffset;
+    }
+
+    if (layer->type == LAYER_HSCROLL) {
+        if (LastXSize != layerwidth) {
+            int fullLayerwidth = layerwidth << 7;
+            for (int i = 0; i < HParallax.entryCount; ++i) {
+                HParallax.linePos[i] = XScrollOffset * HParallax.parallaxFactor[i] >> 7;
+                HParallax.scrollPos[i] += HParallax.scrollSpeed[i];
+                if (HParallax.scrollPos[i] > fullLayerwidth << 16)
+                    HParallax.scrollPos[i] -= fullLayerwidth << 16;
+                if (HParallax.scrollPos[i] < 0)
+                    HParallax.scrollPos[i] += fullLayerwidth << 16;
+                HParallax.linePos[i] += HParallax.scrollPos[i] >> 16;
+                HParallax.linePos[i] %= fullLayerwidth;
+            }
+        }
+        LastXSize = layerwidth;
+    }
+    return yscrollOffset;
+}
+
 #if RETRO_PLATFORM == RETRO_PS1
 #include <psyqo/gpu.hh>
 #include <psyqo/primitives/common.hh>
@@ -30,6 +69,7 @@ byte GraphicData[GFXDATA_MAX];
 #include <psyqo/primitives/quads.hh>
 #include <psyqo/primitives/sprites.hh>
 #include "../ps1/gpu_chain.hh"
+#include "../ps1/video.hh" // PS1Hblanks (layer profiling)
 
 // VRAM layout (1MB, 1024x512 16-bit halfwords):
 //  - framebuffer 320x240 at Y=0 (buf0) and Y=256 (buf1), X=0-319 halfwords (psyqo default)
@@ -42,6 +82,12 @@ byte GraphicData[GFXDATA_MAX];
 #define PS1_CLUT_Y 240
 #define PS1_TILE_PAGE_X 9
 #define PS1_TILE_PAGE_Y 0
+#define PS1_DRAW_BG_LAYERS 1
+// PS1TileVisual word fields (see Drawing.hpp)
+#define PS1_TV_PAGE_SHIFT 16
+#define PS1_TV_DIR_SHIFT  18
+#define PS1_TV_PLANE      0x100000u
+#define PS1_TV_SOLID      0x200000u
 static bool ps1TileSetUploaded = false;
 
 // Palette and clear colour follow PC timing: PC applies the (faded) palette in FlipScreen,
@@ -50,37 +96,114 @@ static bool ps1TileSetUploaded = false;
 // first (they must precede the primitives), filled with the current palette, and rewritten
 // in PS1FinalizePalette() (FlipScreen) with the palette as it stands when drawing is done.
 // 4-bit atlas CLUTs map 16 values to master entries and follow every fade / rotation.
-static uint16_t s_pal[256 + PS1_ATLAS_MAX_CLUTS * 16]; // master CLUT, then the 4-bit CLUTs
+// Ink effects (phase 3c) use more CLUT sources, filled at the same time:
+//  - tint: a full-screen DrawTintRect recolours what was drawn before it (PC: FB index ->
+//    TintLookupTable). The CLUT rows chained before that point are filled with pal[tint[i]], and
+//    the call chains normal rows for what follows.
+//  - INK_BLEND: semi-transparent sprites (B/2 + F/2) through blend CLUTs (rows 504-511, kept free
+//    of atlas CLUTs): source colour = the blend ramp entry of the texel's luminance, STP set.
+#define PS1_PAL_ENTRIES     (256 + PS1_ATLAS_MAX_CLUTS * 16)
+#define PS1_BLEND_MASTER_Y  511 // 256-entry blend CLUT for 8-bit clusters at (0, 511)
+#define PS1_BLEND_ROW_Y0    504 // 16-entry blend CLUTs for 4-bit CLUT k at ((k % 20) * 16, 504 + k / 20)
+#define PS1_BLEND_SLOTS     (7 * 20)
+#define PS1_MASK_CLUT_X     256 // tint-mask marking CLUT (16 entries) at (256, 511)
+static uint16_t s_pal[PS1_PAL_ENTRIES];      // master CLUT, then the 4-bit CLUTs
+static uint16_t s_palTint[PS1_PAL_ENTRIES];  // tinted (same layout)
+static uint16_t s_palBlend[PS1_PAL_ENTRIES]; // blend sources (same layout)
+static uint16_t s_palBlendTint[PS1_PAL_ENTRIES];
+enum { PS1_PAL_NORMAL, PS1_PAL_BLEND };
 struct PS1PalChunk {
     uint16_t *dst;
     uint16_t src, n;
+    uint8_t kind, preTint; // preTint: chained before this frame's tint point
 };
 static PS1PalChunk s_palChunks[256];
 static int s_palChunkCount                  = 0;
 static psyqo::Prim::FastFill *s_clearPrim   = nullptr;
 static bool s_palReserved                   = false;
+static int s_tintID                         = -1;    // this frame's full-screen tint table (-1 = none)
+static bool s_blendUsed                     = false; // blend CLUT rows chained this frame
+static bool s_blendMasterReserved           = false;
+static uint32_t s_blendRowReserved[(PS1_BLEND_SLOTS + 31) / 32];
+static byte s_blendIdx[256];                         // SetBlendTable type 1: ramp entry per src index
+static byte s_blendType                     = 0xFF;  // 0xFF = no blend table yet
+volatile uint32_t g_ps1TintFrames   = 0; // frames with a full-screen tint (GDB)
+volatile uint32_t g_ps1TintPartial  = 0; // frames whose tint left an untinted window (replayed)
+volatile uint32_t g_ps1TintIgnored  = 0; // tint calls after the frame's tint sequence ended (tint of tint)
+volatile uint32_t g_ps1TintMaskSkip = 0; // tint masks not drawn (not a 4-bit atlas cluster)
+volatile uint32_t g_ps1TintWindowApprox = 0; // untinted area was not one rectangle (bounding box used)
+// Tint sequence of a frame: DrawTintRect / DrawScaledTintMask calls in a row. The first call is
+// the tint point; the sequence ends at the next chained primitive (chain hook) or FlipScreen.
+static int s_tintSeq = 0; // 0 none, 1 open, 2 finished
+static uint32_t *s_sceneMark = nullptr; // chain position after the frame-start CLUT rows
+static uint32_t *s_tintMark  = nullptr; // chain position of the tint point
+struct PS1TintRectRec {
+    int16_t x0, y0, x1, y1;
+};
+static PS1TintRectRec s_tintRects[8];
+static int s_tintRectCount = 0;
+struct PS1TintMaskRec {
+    int direction, XPos, YPos, pivotX, pivotY, scaleX, scaleY, width, height, sprX, sprY, sheetID;
+};
+static PS1TintMaskRec s_tintMask;
+static bool s_tintMaskPending = false;
+static uint8_t s_ps1QuadMaskMode = 0; // DrawScaledSprite: 1 = mark the mask bit, colours unchanged
+volatile uint32_t g_ps1BlendSprites = 0; // INK_BLEND atlas sprites drawn
+
+static uint16_t PS1Conv(const Colour &c) {
+    uint16_t v = (uint16_t)((c.r >> 3) | ((c.g >> 3) << 5) | ((c.b >> 3) << 10));
+    return v ? v : 0x8000; // visible black -> non-transparent black for opaque commands
+}
+
+static const byte *PS1TintTable(int id) {
+    switch (id) {
+        case 1: return TintLookupTable2;
+        case 2: return TintLookupTable3;
+        case 3: return TintLookupTable4;
+        default: return TintLookupTable1;
+    }
+}
+
+static void PS1Expand4Bit(uint16_t *base, int count) {
+    for (int k = 0; k < count; ++k) {
+        const uint8_t *map = g_ps1AtlasCluts[k].map;
+        uint16_t *dst      = &base[256 + k * 16];
+        dst[0]             = 0x0000; // transparent
+        for (int i = 1; i < 16; ++i) dst[i] = base[map[i]];
+    }
+}
 
 static void PS1BuildPalette() {
     // PaletteMode set: the faded palette (TilePaletteF, updated by SetFade).
     const Colour *pal = PaletteMode ? TilePaletteF : TilePalette;
-    for (int i = 0; i < 256; ++i) {
-        byte r = pal[i].r, g = pal[i].g, b = pal[i].b;
-        uint16_t c = (uint16_t)(((r >> 3)) | ((g >> 3) << 5) | ((b >> 3) << 10));
-        if (i == 0)
-            c = 0x0000; // index 0 = transparent (matches RSDKv2 sprite transparency)
-        else if (c == 0x0000)
-            c = 0x8000; // visible black -> non-transparent black for opaque commands
-        s_pal[i] = c;
+    s_pal[0] = 0x0000; // index 0 = transparent (matches RSDKv2 sprite transparency)
+    for (int i = 1; i < 256; ++i) s_pal[i] = PS1Conv(pal[i]);
+    PS1Expand4Bit(s_pal, g_ps1AtlasClutCount);
+    const byte *tint = s_tintID >= 0 ? PS1TintTable(s_tintID) : nullptr;
+    if (tint) {
+        s_palTint[0] = 0x0000;
+        for (int i = 1; i < 256; ++i) s_palTint[i] = PS1Conv(pal[tint[i]]);
+        PS1Expand4Bit(s_palTint, g_ps1AtlasClutCount);
     }
-    for (int k = 0; k < g_ps1AtlasClutCount; ++k) {
-        const uint8_t *map = g_ps1AtlasCluts[k].map;
-        uint16_t *dst      = &s_pal[256 + k * 16];
-        dst[0]             = 0x0000; // transparent
-        for (int i = 1; i < 16; ++i) dst[i] = s_pal[map[i]];
+    if (s_blendUsed) {
+        int n4 = g_ps1AtlasClutCount < PS1_BLEND_SLOTS ? g_ps1AtlasClutCount : PS1_BLEND_SLOTS;
+        s_palBlend[0] = 0x0000;
+        for (int i = 1; i < 256; ++i) s_palBlend[i] = (s_blendType == 1 ? PS1Conv(pal[s_blendIdx[i]]) : s_pal[i]) | 0x8000;
+        PS1Expand4Bit(s_palBlend, n4);
+        if (tint) {
+            s_palBlendTint[0] = 0x0000;
+            for (int i = 1; i < 256; ++i)
+                s_palBlendTint[i] = (s_blendType == 1 ? PS1Conv(pal[tint[s_blendIdx[i]]]) : s_palTint[i]) | 0x8000;
+            PS1Expand4Bit(s_palBlendTint, n4);
+        }
     }
 }
 
 static psyqo::Color PS1ClearColour() {
+    if (s_tintID >= 0) { // PC: the cleared index 0 goes through the tint table too
+        const Colour &c = (PaletteMode ? TilePaletteF : TilePalette)[PS1TintTable(s_tintID)[0]];
+        return psyqo::Color{{.r = c.r, .g = c.g, .b = c.b}};
+    }
     // Under a fade the empty screen is the fade colour's share (PC: ClearScreen(0) + faded
     // palette entry 0 = black).
     if (!PaletteMode)
@@ -90,23 +213,26 @@ static psyqo::Color PS1ClearColour() {
 }
 
 static void PS1FillPaletteChunks() {
-    for (int i = 0; i < s_palChunkCount; ++i)
-        memcpy(s_palChunks[i].dst, &s_pal[s_palChunks[i].src], s_palChunks[i].n * sizeof(uint16_t));
+    for (int i = 0; i < s_palChunkCount; ++i) {
+        const PS1PalChunk &c = s_palChunks[i];
+        bool tinted          = c.preTint && s_tintID >= 0;
+        const uint16_t *src  = c.kind == PS1_PAL_BLEND ? (tinted ? s_palBlendTint : s_palBlend) : (tinted ? s_palTint : s_pal);
+        memcpy(c.dst, &src[c.src], c.n * sizeof(uint16_t));
+    }
 }
 
-static void PS1ReserveRow(int src, int count, int16_t x, int16_t y) {
+static void PS1ReserveRow(int src, int count, int16_t x, int16_t y, uint8_t kind = PS1_PAL_NORMAL) {
     uint16_t *data[32];
     uint16_t len[32];
     int n = PS1ChainReserveRow(count, x, y, data, len, 32);
     for (int i = 0; i < n && s_palChunkCount < 256; ++i) {
-        s_palChunks[s_palChunkCount++] = PS1PalChunk{data[i], (uint16_t)src, len[i]};
+        s_palChunks[s_palChunkCount++] = PS1PalChunk{data[i], (uint16_t)src, len[i], kind, (uint8_t)(s_tintID < 0)};
         src += len[i];
     }
 }
 
-void PS1UploadPalette() {
-    PS1BuildPalette();
-    s_palChunkCount = 0;
+// Master CLUT + the 4-bit atlas CLUT rows, chained here and filled at FlipScreen.
+static void PS1ReservePaletteRows() {
     PS1ReserveRow(0, 256, PS1_CLUT_X, PS1_CLUT_Y);
     for (int k = 0; k < g_ps1AtlasClutCount;) { // runs of adjacent slots in one VRAM row
         int run = 1;
@@ -116,20 +242,158 @@ void PS1UploadPalette() {
         PS1ReserveRow(256 + k * 16, run * 16, (int16_t)g_ps1AtlasCluts[k].x, (int16_t)g_ps1AtlasCluts[k].y);
         k += run;
     }
+}
+
+void PS1UploadPalette() {
+    s_tintID              = -1;
+    s_blendUsed           = false;
+    s_blendMasterReserved = false;
+    memset(s_blendRowReserved, 0, sizeof(s_blendRowReserved));
+    PS1BuildPalette();
+    s_palChunkCount = 0;
+    PS1ReservePaletteRows();
     PS1FillPaletteChunks();
     PS1ChainFlushCache(); // the GPU caches CLUTs
     s_palReserved = true;
+    s_tintSeq     = 0;
+    s_sceneMark   = PS1ChainMark();
 }
 
 void PS1FinalizePalette() {
     if (!s_palReserved)
         return;
+    PS1ChainRunHook(); // a tint sequence ending the frame
     s_palReserved = false;
     PS1BuildPalette();
     PS1FillPaletteChunks();
     if (s_clearPrim)
         s_clearPrim->setColor(PS1ClearColour());
     s_clearPrim = nullptr;
+}
+
+void DrawScaledSprite(int direction, int XPos, int YPos, int pivotX, int pivotY, int scaleX, int scaleY, int width, int height, int sprX, int sprY,
+                      int sheetID);
+
+// End of a tint sequence (PC: the rects and the tint mask recolour the framebuffer's indices).
+// The whole frame so far was drawn tinted (frame-start CLUT rows); the untinted window is
+// drawn again on top: mark the tint mask's texels with the mask bit (additive black: colours
+// unchanged), clip to the window, and replay the scene chained before the tint point with the
+// normal CLUT rows and the mask test on (psx-spx GP0 E6h).
+static void PS1FinishTint() {
+    s_tintSeq = 2;
+    // Untinted area = screen minus the rects: cells between rect edges not covered by any rect.
+    int xs[18], ys[18], nx = 0, ny = 0;
+    xs[nx++] = 0, xs[nx++] = SCREEN_XSIZE, ys[ny++] = 0, ys[ny++] = SCREEN_YSIZE;
+    for (int i = 0; i < s_tintRectCount; ++i) {
+        xs[nx++] = s_tintRects[i].x0, xs[nx++] = s_tintRects[i].x1;
+        ys[ny++] = s_tintRects[i].y0, ys[ny++] = s_tintRects[i].y1;
+    }
+    int bx0 = SCREEN_XSIZE, by0 = SCREEN_YSIZE, bx1 = 0, by1 = 0, uncovered = 0;
+    for (int a = 0; a < nx; ++a)
+        for (int b = 0; b < ny; ++b) {
+            // cell [xs[a], next x) x [ys[b], next y)
+            int cx1 = SCREEN_XSIZE, cy1 = SCREEN_YSIZE;
+            for (int k = 0; k < nx; ++k)
+                if (xs[k] > xs[a] && xs[k] < cx1)
+                    cx1 = xs[k];
+            for (int k = 0; k < ny; ++k)
+                if (ys[k] > ys[b] && ys[k] < cy1)
+                    cy1 = ys[k];
+            if (xs[a] >= SCREEN_XSIZE || ys[b] >= SCREEN_YSIZE)
+                continue;
+            bool covered = false;
+            for (int i = 0; i < s_tintRectCount && !covered; ++i)
+                covered = s_tintRects[i].x0 <= xs[a] && s_tintRects[i].x1 >= cx1 && s_tintRects[i].y0 <= ys[b] && s_tintRects[i].y1 >= cy1;
+            if (covered)
+                continue;
+            uncovered += (cx1 - xs[a]) * (cy1 - ys[b]);
+            if (xs[a] < bx0) bx0 = xs[a];
+            if (ys[b] < by0) by0 = ys[b];
+            if (cx1 > bx1) bx1 = cx1;
+            if (cy1 > by1) by1 = cy1;
+        }
+    if (!uncovered) // the rects cover the screen: a plain full tint (the tint mask adds nothing)
+        return;
+    // cells are counted once per distinct (x, y) edge pair; duplicates only inflate `uncovered`
+    if (uncovered < (bx1 - bx0) * (by1 - by0))
+        g_ps1TintWindowApprox = g_ps1TintWindowApprox + 1;
+    g_ps1TintPartial = g_ps1TintPartial + 1;
+    bool skipPrims       = g_ps1ChainSkipPrims; // layers-only debug captures: the marks belong to the layers
+    g_ps1ChainSkipPrims  = false;
+    bool masked = false;
+    if (s_tintMaskPending) {
+        const PS1TintMaskRec &m = s_tintMask;
+        uint32_t before         = g_ps1TintMaskSkip;
+        PS1ChainMaskControl(true, false);
+        s_ps1QuadMaskMode = 1;
+        DrawScaledSprite(m.direction, m.XPos, m.YPos, m.pivotX, m.pivotY, m.scaleX, m.scaleY, m.width, m.height, m.sprX, m.sprY, m.sheetID);
+        s_ps1QuadMaskMode = 0;
+        masked = g_ps1TintMaskSkip == before;
+    }
+    PS1ChainMaskControl(false, masked);
+    PS1ChainDrawArea(bx0, by0, bx1, by1);
+    PS1ChainReplay(s_sceneMark, s_tintMark);
+    PS1ChainDrawAreaReset();
+    if (masked)
+        PS1ChainMaskControl(false, false);
+    PS1ChainInvalidateTPage();
+    g_ps1ChainSkipPrims = skipPrims;
+}
+
+// The tint point: the first DrawTintRect / DrawScaledTintMask of a frame.
+static void PS1TintBegin(int tintID) {
+    s_tintID = tintID;
+    g_ps1TintFrames = g_ps1TintFrames + 1;
+    s_tintMark = PS1ChainMark();
+    PS1ReservePaletteRows();
+    PS1ChainFlushCache();
+    s_blendMasterReserved = false; // blend rows chained before the tint are tinted: re-chain
+    memset(s_blendRowReserved, 0, sizeof(s_blendRowReserved));
+    s_tintSeq         = 1;
+    s_tintRectCount   = 0;
+    s_tintMaskPending = false;
+    PS1ChainSetHook(PS1FinishTint);
+}
+
+// DrawTintRect: the first call of a frame is the tint point. Everything chained before it is shown
+// through the tint table (the frame-start CLUT rows get pal[tint[i]] at FlipScreen); normal CLUT
+// rows are chained here for what follows. Partial rects leave an untinted window (PS1FinishTint).
+static void PS1TintRect(int x, int y, int w, int h, int tintID) {
+    if (!s_palReserved)
+        return;
+    if (s_tintSeq == 2) { // a second tint sequence in one frame (tint of tint): not modelled
+        g_ps1TintIgnored = g_ps1TintIgnored + 1;
+        return;
+    }
+    if (s_tintSeq == 0)
+        PS1TintBegin(tintID);
+    if (s_tintRectCount < 8)
+        s_tintRects[s_tintRectCount++] = PS1TintRectRec{(int16_t)x, (int16_t)y, (int16_t)(x + w), (int16_t)(y + h)};
+}
+
+// Blend CLUT for an atlas cluster, chained (once per frame and tint side) before its first use.
+static bool PS1BlendClut(const PS1AtlasCluster *c, psyqo::PrimPieces::ClutIndex &out) {
+    if (c->clut == 0xFFFF) {
+        if (!s_blendMasterReserved) {
+            PS1ReserveRow(0, 256, 0, PS1_BLEND_MASTER_Y, PS1_PAL_BLEND);
+            PS1ChainFlushCache();
+            s_blendMasterReserved = true;
+        }
+        out = psyqo::PrimPieces::ClutIndex(psyqo::Vertex{{.x = 0, .y = PS1_BLEND_MASTER_Y}});
+    } else {
+        int k = c->clut;
+        if (k >= PS1_BLEND_SLOTS)
+            return false;
+        int16_t x = (int16_t)((k % 20) * 16), y = (int16_t)(PS1_BLEND_ROW_Y0 + k / 20);
+        if (!(s_blendRowReserved[k >> 5] & (1u << (k & 31)))) {
+            PS1ReserveRow(256 + k * 16, 16, x, y, PS1_PAL_BLEND);
+            PS1ChainFlushCache();
+            s_blendRowReserved[k >> 5] |= 1u << (k & 31);
+        }
+        out = psyqo::PrimPieces::ClutIndex(psyqo::Vertex{{.x = x, .y = y}});
+    }
+    s_blendUsed = true;
+    return true;
 }
 
 static void PS1ClearClusterCache();
@@ -209,7 +473,7 @@ static psyqo::PrimPieces::ClutIndex PS1ClusterClut(const PS1AtlasCluster *c) {
 // Draws sheet texels (sprX, sprY, w, h) at (XPos, YPos). A frame can span several clusters
 // (frames wider/taller than a texture page are cut by the atlas builder): draw the part in
 // the cluster under the top-left texel, then the strip to its right and the band below.
-static void PS1DrawAtlasRect(int sheet, int XPos, int YPos, int width, int height, int sprX, int sprY) {
+static void PS1DrawAtlasRect(int sheet, int XPos, int YPos, int width, int height, int sprX, int sprY, bool blend = false) {
     struct Rect16 {
         int16_t x, y, w, h;
     } stack[16];
@@ -227,8 +491,12 @@ static void PS1DrawAtlasRect(int sheet, int XPos, int YPos, int width, int heigh
         psyqo::Prim::Sprite s(psyqo::Color{{.r = 0x80, .g = 0x80, .b = 0x80}});
         s.position = psyqo::Vertex{{.x = (int16_t)(XPos + r.x - sprX), .y = (int16_t)(YPos + r.y - sprY)}};
         s.size     = psyqo::Vertex{{.w = (int16_t)iw, .h = (int16_t)ih}};
-        s.texInfo  = psyqo::PrimPieces::TexInfo{(uint8_t)(c->u + r.x - c->srcX), (uint8_t)(c->v + r.y - c->srcY),
-                                               PS1ClusterClut(c)};
+        psyqo::PrimPieces::ClutIndex clut = PS1ClusterClut(c);
+        if (blend && PS1BlendClut(c, clut)) { // INK_BLEND: B/2 + F/2 (the cluster texpage's mode 0)
+            s.setSemiTrans();
+            g_ps1BlendSprites = g_ps1BlendSprites + 1;
+        }
+        s.texInfo = psyqo::PrimPieces::TexInfo{(uint8_t)(c->u + r.x - c->srcX), (uint8_t)(c->v + r.y - c->srcY), clut};
         PS1ChainSprite(s);
         if (r.w > iw && sp < 16)
             stack[sp++] = Rect16{(int16_t)(r.x + iw), r.y, (int16_t)(r.w - iw), (int16_t)ih};
@@ -273,6 +541,86 @@ bool PS1AllocDirectSurface(int sheetID) {
 // layout at build time (convert_tiles.py), so each page is one 64 KB read + one DMA.
 void PS1InvalidateTileSet() { ps1TileSetUploaded = false; } // stage change: next frame uploads the new set
 
+// BG line strips (tools/bgstrips/build_bgstrips.py -> Data/Stages/<Stage>/BGStrips.bin): BG layer
+// lines pre-rendered at build time as 8-bit rows of one horizontal period, in VRAM the sprite
+// atlas leaves free. A band of lines in a strip region costs 1-3 sprites instead of ~21 tiles.
+#define PS1_STRIP_MAX 64
+struct PS1StripRegion {
+    uint8_t layer, plane, pieces, pad;
+    uint16_t line0, lines, period;
+    uint16_t x[3], y[3], w[3]; // piece VRAM origin (halfwords, column start) and width (texels)
+};
+static PS1StripRegion s_ps1Strips[PS1_STRIP_MAX];
+static int s_ps1StripCount = 0;
+static uint8_t s_ps1StripRow[LAYER_COUNT][2][TILELAYER_SCROLL_MAX / TILE_SIZE]; // region + 1 per tile row
+volatile uint32_t g_ps1StripRegions = 0; // regions loaded for this stage (GDB)
+
+// Per chunk: bit (tileRow * 2 + plane) set when that 8-tile row has a visible tile on that
+// plane, so the tile renderer skips empty chunk rows (the high plane is almost empty).
+static uint16_t s_ps1ChunkRowPlanes[CHUNKTILE_COUNT / 64];
+static void PS1BuildChunkRowPlanes() {
+    const uint32_t *vis = (const uint32_t *)StageTiles.gfxDataPos;
+    for (int c = 0; c < CHUNKTILE_COUNT / 64; ++c) {
+        uint16_t m = 0;
+        for (int t = 0; t < 64; ++t) {
+            uint32_t tv = vis[(c << 6) + t];
+            if (tv & PS1_TV_SOLID)
+                m |= 1 << ((t >> 3) * 2 + ((tv & PS1_TV_PLANE) ? 1 : 0));
+        }
+        s_ps1ChunkRowPlanes[c] = m;
+    }
+}
+
+static void PS1LoadBGStrips() {
+    s_ps1StripCount = 0;
+    g_ps1StripRegions = 0;
+    memset(s_ps1StripRow, 0, sizeof(s_ps1StripRow));
+    FileInfo info;
+    if (!LoadStageFile("BGStrips.bin", StageListPosition, &info))
+        return;
+    byte head[8];
+    FileRead(head, 8);
+    int count = head[4] | (head[5] << 8);
+    if (memcmp(head, "BGS1", 4) || count > PS1_STRIP_MAX) {
+        CloseFile();
+        return;
+    }
+    for (int i = 0; i < count; ++i) {
+        byte e[28];
+        FileRead(e, 28);
+        PS1StripRegion &r = s_ps1Strips[i];
+        r.layer  = e[0];
+        r.plane  = e[1] & 1;
+        r.line0  = e[2] | (e[3] << 8);
+        r.lines  = e[4] | (e[5] << 8);
+        r.period = e[6] | (e[7] << 8);
+        r.pieces = e[8];
+        for (int k = 0; k < 3; ++k) {
+            r.x[k] = e[10 + 6 * k] | (e[11 + 6 * k] << 8);
+            r.y[k] = e[12 + 6 * k] | (e[13 + 6 * k] << 8);
+            r.w[k] = e[14 + 6 * k] | (e[15 + 6 * k] << 8);
+        }
+    }
+    PS1GpuImmediate();
+    for (int i = 0; i < count; ++i) {
+        PS1StripRegion &r = s_ps1Strips[i];
+        for (int k = 0; k < r.pieces; ++k) {
+            int rowsPerChunk = (int)sizeof(TileGfx) / r.w[k];
+            for (int row = 0; row < r.lines; row += rowsPerChunk) {
+                int n = r.lines - row < rowsPerChunk ? r.lines - row : rowsPerChunk;
+                FileRead(TileGfx, n * r.w[k]);
+                g_ps1GPU->uploadToVRAM((const uint16_t *)TileGfx,
+                                       psyqo::Rect{{(int16_t)r.x[k], (int16_t)(r.y[k] + row)}, {(int16_t)(r.w[k] / 2), (int16_t)n}});
+            }
+        }
+        if (r.layer < LAYER_COUNT)
+            for (int row = r.line0 >> 4; row < (r.line0 + r.lines) >> 4; ++row) s_ps1StripRow[r.layer][r.plane][row] = (uint8_t)(i + 1);
+    }
+    CloseFile();
+    s_ps1StripCount   = count;
+    g_ps1StripRegions = count;
+}
+
 void PS1UploadTileSet() {
     if (ps1TileSetUploaded)
         return;
@@ -289,70 +637,362 @@ void PS1UploadTileSet() {
         g_ps1GPU->uploadToVRAM((const uint16_t *)TileGfx, psyqo::Rect{{(int16_t)(px * 64), (int16_t)(py * 256)}, {128, 256}});
     }
     CloseFile();
+    PS1LoadBGStrips();
+    PS1BuildChunkRowPlanes();
     ps1TileSetUploaded = true;
 }
 
-// Draw one 16x16 tile as a Sprite16x16. tileIndex is StageTiles.tileIndex[].
-static void PS1DrawTileQuad(int screenX, int screenY, int tileIndex) {
-    if (tileIndex <= 0)           // tile 0 = transparent/empty
-        return;
-    int page  = tileIndex >> 8;   // 0..3 (1024 tiles / 256 per page)
-    int pt    = tileIndex & 0xFF; // 0..255 within the page
-    int u     = (pt & 0xF) << 4;  // 16 * (pt % 16)
-    int v     = (pt >> 4) << 4;   // 16 * (pt / 16)
-    int pageX = PS1_TILE_PAGE_X + 2 * (page & 1); // 9, 11, 9, 11
-    int pageY = PS1_TILE_PAGE_Y + (page >> 1);    // 0, 0, 1, 1
-
-    psyqo::PrimPieces::TPageAttr attr;
-    attr.set(psyqo::Prim::TPageAttr::ColorMode::Tex8Bits);
-    attr.setPageX((uint8_t)pageX);
-    attr.setPageY((uint8_t)pageY);
-    PS1ChainTPage(attr);
-
-    psyqo::Prim::Sprite16x16 s(psyqo::Color{{.r = 0x80, .g = 0x80, .b = 0x80}});
-    s.position = psyqo::Vertex{{.x = (int16_t)screenX, .y = (int16_t)screenY}};
-    s.texInfo  = psyqo::PrimPieces::TexInfo{(uint8_t)u, (uint8_t)v,
-                   psyqo::PrimPieces::ClutIndex(psyqo::Vertex{{.x = PS1_CLUT_X, .y = PS1_CLUT_Y}})};
-    PS1ChainSprite16(s);
+// Tile texture origin in the pre-packed tile pages (16x16Tiles.vram, 256 tiles per page).
+static void PS1TileTexOf(int tileIndex, int &pageX, int &pageY, int &u, int &v) {
+    int page = tileIndex >> 8; // 0..3 (1024 tiles / 256 per page)
+    int pt   = tileIndex & 0xFF;
+    u        = (pt & 0xF) << 4;
+    v        = (pt >> 4) << 4;
+    pageX    = PS1_TILE_PAGE_X + 2 * (page & 1); // 9, 11, 9, 11
+    pageY    = PS1_TILE_PAGE_Y + (page >> 1);    // 0, 0, 1, 1
 }
 
-// Minimal flat tile renderer: no flip/deform/water yet. Only the chunks that
-// intersect the 320x240 view are visited (a view touches at most 4x3 chunks).
+// Textured quad (x, y, w, h) sampling u uL..uR (exclusive, may run backwards) and v vT..vB.
+static void PS1ChainTileQuad(int x, int y, int w, int h, int pageX, int pageY, int uL, int uR, int vT, int vB) {
+    psyqo::Prim::TexturedQuad quad(psyqo::Color{{.r = 0x80, .g = 0x80, .b = 0x80}});
+    quad.pointA    = psyqo::Vertex{{.x = (int16_t)x, .y = (int16_t)y}};
+    quad.uvA       = psyqo::PrimPieces::UVCoords{(uint8_t)uL, (uint8_t)vT};
+    quad.clutIndex = psyqo::PrimPieces::ClutIndex(psyqo::Vertex{{.x = PS1_CLUT_X, .y = PS1_CLUT_Y}});
+    quad.pointB    = psyqo::Vertex{{.x = (int16_t)(x + w), .y = (int16_t)y}};
+    quad.uvB       = psyqo::PrimPieces::UVCoords{(uint8_t)uR, (uint8_t)vT};
+    quad.tpage.setPageX((uint8_t)pageX);
+    quad.tpage.setPageY((uint8_t)pageY);
+    quad.tpage.set(psyqo::Prim::TPageAttr::ColorMode::Tex8Bits);
+    quad.pointC = psyqo::Vertex{{.x = (int16_t)x, .y = (int16_t)(y + h)}};
+    quad.uvC    = psyqo::PrimPieces::UVCoordsPadded{(uint8_t)uL, (uint8_t)vB, 0};
+    quad.pointD = psyqo::Vertex{{.x = (int16_t)(x + w), .y = (int16_t)(y + h)}};
+    quad.uvD    = psyqo::PrimPieces::UVCoordsPadded{(uint8_t)uR, (uint8_t)vB, 0};
+    PS1ChainQuad(quad);
+}
+
+// Rows [ty0, ty0 + h) of a 16x16 tile (tile rows before flipping) at screen (sx, sy).
+// Unflipped: Sprite16x16 / Sprite. Flipped (FLIP_X/Y/XY): a textured quad whose UVs run
+// backwards -- column k samples u+15-k from uL = u+15 to uR = u-1 (exclusive), 1:1 like PC.
+// No GP0(E1h) rectangle flip bits: old PSX GPUs don't support them (psx-spx GPU).
+volatile uint32_t g_ps1LayerPrims = 0; // tile-layer primitives chained this frame (GDB)
+static void PS1DrawTilePiece(int sx, int sy, int tileIndex, int ty0, int h, int dir) {
+    int pageX, pageY, u, v;
+    PS1TileTexOf(tileIndex, pageX, pageY, u, v);
+    if (dir == FLIP_NONE) {
+        psyqo::PrimPieces::TPageAttr attr;
+        attr.set(psyqo::Prim::TPageAttr::ColorMode::Tex8Bits);
+        attr.setPageX((uint8_t)pageX);
+        attr.setPageY((uint8_t)pageY);
+        PS1ChainTPage(attr);
+        psyqo::PrimPieces::ClutIndex clut(psyqo::Vertex{{.x = PS1_CLUT_X, .y = PS1_CLUT_Y}});
+        if (h == TILE_SIZE) {
+            psyqo::Prim::Sprite16x16 s(psyqo::Color{{.r = 0x80, .g = 0x80, .b = 0x80}});
+            s.position = psyqo::Vertex{{.x = (int16_t)sx, .y = (int16_t)sy}};
+            s.texInfo  = psyqo::PrimPieces::TexInfo{(uint8_t)u, (uint8_t)v, clut};
+            PS1ChainSprite16(s);
+        } else {
+            psyqo::Prim::Sprite s(psyqo::Color{{.r = 0x80, .g = 0x80, .b = 0x80}});
+            s.position = psyqo::Vertex{{.x = (int16_t)sx, .y = (int16_t)sy}};
+            s.texInfo  = psyqo::PrimPieces::TexInfo{(uint8_t)u, (uint8_t)(v + ty0), clut};
+            s.size     = psyqo::Vertex{{.x = TILE_SIZE, .y = (int16_t)h}};
+            PS1ChainSprite(s);
+        }
+        return;
+    }
+    int uL = (dir & FLIP_X) ? u + 15 : u;
+    int uR = (dir & FLIP_X) ? u - 1 : u + 16;
+    int dv = (dir & FLIP_Y) ? -1 : 1;
+    int vT = (dir & FLIP_Y) ? v + 15 - ty0 : v + ty0;
+    // u = -1 / 256 doesn't fit a UV byte: address the tile from the neighbouring 8-bit page
+    // (pageX +-1 = 128 texels); the texels actually sampled stay inside the tile.
+    if (uR < 0) {
+        pageX -= 1, uL += 128, uR += 128;
+    } else if (uR > 255) {
+        pageX += 1, uL -= 128, uR -= 128;
+    }
+    int vB = vT + h * dv;
+    if (vB < 0 || vB > 255) { // pageY can't shift: the last row gets its own constant-v strip
+        int vLast = vT + (h - 1) * dv;
+        if (h > 1)
+            PS1ChainTileQuad(sx, sy, TILE_SIZE, h - 1, pageX, pageY, uL, uR, vT, vLast);
+        PS1ChainTileQuad(sx, sy + h - 1, TILE_SIZE, 1, pageX, pageY, uL, uR, vLast, vLast);
+        return;
+    }
+    PS1ChainTileQuad(sx, sy, TILE_SIZE, h, pageX, pageY, uL, uR, vT, vB);
+}
+
+uint32_t PS1TileVisual(int tileIndex, int direction, int visualPlane) {
+    if (tileIndex <= 0) // tile 0 = empty (its texels are all 0)
+        return 0;
+    int pageX, pageY, u, v;
+    PS1TileTexOf(tileIndex, pageX, pageY, u, v);
+    return (uint32_t)(u | (v << 8)) | ((uint32_t)(tileIndex >> 8) << PS1_TV_PAGE_SHIFT) | ((uint32_t)(direction & 3) << PS1_TV_DIR_SHIFT)
+           | (visualPlane ? PS1_TV_PLANE : 0) | PS1_TV_SOLID;
+}
+
+// Phase-2 tile self-test helper: one full unflipped tile.
+static void PS1DrawTileQuad(int screenX, int screenY, int tileIndex) {
+    if (tileIndex > 0)
+        PS1DrawTilePiece(screenX, screenY, tileIndex, 0, TILE_SIZE, FLIP_NONE);
+}
+
+// One band: screen lines [sy, sy + h) showing layer lines [ly, ly + h) (inside one tile row)
+// scrolled to chunkX. Lines off the top/bottom of the screen are free to draw (the GPU clips
+// them), so a band touching a screen edge is extended to whole tile rows (Sprite16x16).
+// Hot path (whole unflipped tiles): one visual-word load + compare, 3 raw words chained.
+static void PS1DrawTileBand(const TileLayer *layer, byte above, int sy, int h, int ly, int chunkX, int fullW) {
+    int ty0 = ly & 0xF;
+    if (sy == 0) {
+        sy -= ty0, h += ty0, ty0 = 0;
+    }
+    if (sy + h == SCREEN_YSIZE)
+        h = TILE_SIZE - ty0;
+    static uint32_t s_tileClutWord = 0;
+    static psyqo::PrimPieces::TPageAttr s_tileTPage[4];
+    if (!s_tileClutWord) {
+        psyqo::PrimPieces::ClutIndex clut(psyqo::Vertex{{.x = PS1_CLUT_X, .y = PS1_CLUT_Y}});
+        uint16_t c;
+        memcpy(&c, &clut, 2);
+        s_tileClutWord = (uint32_t)c << 16;
+        for (int p = 0; p < 4; ++p) {
+            s_tileTPage[p].set(psyqo::Prim::TPageAttr::ColorMode::Tex8Bits);
+            s_tileTPage[p].setPageX((uint8_t)(PS1_TILE_PAGE_X + 2 * (p & 1)));
+            s_tileTPage[p].setPageY((uint8_t)(PS1_TILE_PAGE_Y + (p >> 1)));
+        }
+    }
+    const ushort *chunkRow = &layer->tiles[(ly >> 7) * TILELAYER_CHUNK_W];
+    const uint32_t *vis    = (const uint32_t *)StageTiles.gfxDataPos;
+    int tileRow            = ((ly & 0x7F) >> 4) << 3;
+    uint32_t want          = PS1_TV_SOLID | (above ? PS1_TV_PLANE : 0);
+    uint32_t yWord         = (uint32_t)(uint16_t)sy << 16;
+    bool whole             = h == TILE_SIZE;
+    int curPage            = -1;
+    int prims              = 0;
+    int px                 = chunkX & ~0xF;
+    uint16_t rowBit        = 1 << ((tileRow >> 3) * 2 + (above ? 1 : 0));
+    for (int sx = -(chunkX & 0xF); sx < SCREEN_XSIZE;) {
+        int chunk = chunkRow[px >> 7];
+        if (!(s_ps1ChunkRowPlanes[chunk] & rowBit)) { // nothing on this plane in this chunk row
+            int skip = CHUNK_SIZE - (px & 0x7F);
+            sx += skip;
+            px += skip;
+            if (px >= fullW)
+                px -= fullW;
+            continue;
+        }
+        uint32_t tv = vis[(chunk << 6) + ((px & 0x7F) >> 4) + tileRow];
+        sx += TILE_SIZE;
+        px += TILE_SIZE;
+        if (px >= fullW)
+            px = 0;
+        if ((tv & (PS1_TV_SOLID | PS1_TV_PLANE)) != want)
+            continue;
+        ++prims;
+        int dir  = (tv >> PS1_TV_DIR_SHIFT) & 3;
+        int page = (tv >> PS1_TV_PAGE_SHIFT) & 3;
+        int dx = sx - TILE_SIZE;
+        if (whole && dir == FLIP_NONE) {
+            if (page != curPage) {
+                PS1ChainTPage(s_tileTPage[page]);
+                curPage = page;
+            }
+            PS1ChainSprite16Raw(yWord | (uint16_t)dx, (tv & 0xFFFF) | s_tileClutWord);
+        } else {
+            int tileIndex = (page << 8) | ((tv >> 8) & 0xF0) | ((tv & 0xFF) >> 4);
+            PS1DrawTilePiece(dx, sy, tileIndex, ty0, h, dir);
+            curPage = -1; // quads carry their own texpage; sprites set it themselves
+        }
+    }
+    g_ps1LayerPrims = g_ps1LayerPrims + prims;
+}
+
+// A band of lines [ly, ly + h) inside a strip region, scrolled to chunkX: walk the period from
+// chunkX % period across the screen, one sprite per piece run (a piece is <= 256 texels, one
+// page). Only the runs of piece `piece` are drawn: strip bands never overlap, so the caller
+// draws all bands piece by piece and the texpage changes once per piece, not per sprite.
+static int PS1DrawStripBand(const PS1StripRegion &r, int sy, int h, int ly, int chunkX, int piece) {
+    static uint32_t s_clut = 0;
+    if (!s_clut) {
+        psyqo::PrimPieces::ClutIndex clut(psyqo::Vertex{{.x = PS1_CLUT_X, .y = PS1_CLUT_Y}});
+        uint16_t c;
+        memcpy(&c, &clut, 2);
+        s_clut = c;
+    }
+    int row   = ly - r.line0;
+    int t     = chunkX % r.period;
+    int prims = 0;
+    for (int x = 0; x < SCREEN_XSIZE;) {
+        int k = 0, s0 = 0;
+        while (t >= s0 + r.w[k]) s0 += r.w[k++];
+        int u   = t - s0;
+        int run = r.w[k] - u;
+        if (run > SCREEN_XSIZE - x)
+            run = SCREEN_XSIZE - x;
+        if (k != piece) {
+            x += run;
+            t += run;
+            if (t >= r.period)
+                t -= r.period;
+            continue;
+        }
+        psyqo::PrimPieces::TPageAttr attr;
+        attr.set(psyqo::Prim::TPageAttr::ColorMode::Tex8Bits);
+        attr.setPageX((uint8_t)(r.x[k] >> 6));
+        attr.setPageY((uint8_t)(r.y[k] >> 8));
+        PS1ChainTPage(attr);
+        psyqo::Prim::Sprite s(psyqo::Color{{.r = 0x80, .g = 0x80, .b = 0x80}});
+        s.position = psyqo::Vertex{{.x = (int16_t)x, .y = (int16_t)sy}};
+        psyqo::PrimPieces::ClutIndex clut;
+        memcpy(&clut, &s_clut, 2);
+        s.texInfo = psyqo::PrimPieces::TexInfo{(uint8_t)u, (uint8_t)((r.y[k] & 0xFF) + row), clut};
+        s.size    = psyqo::Vertex{{.x = (int16_t)run, .y = (int16_t)h}};
+        PS1ChainSprite(s);
+        ++prims;
+        x += run;
+        t += run;
+        if (t >= r.period)
+            t -= r.period;
+    }
+    return prims;
+}
+
+// GPU version of DrawHLineScrollLayer: the same per-line scroll (HParallax line positions,
+// deformation, BG Y parallax + autoscroll, wrap, visual plane, flips), drawn as bands of lines
+// that share one X scroll (a band never crosses a 16-line tile row).
+static short s_ps1LineX[SCREEN_YSIZE];
+struct PS1StripBand {
+    short sy, h, ly, chunkX;
+    uint8_t region;
+};
+static PS1StripBand s_ps1StripBands[SCREEN_YSIZE];
+volatile uint32_t g_ps1LayerHbl = 0; // CPU time of this frame's tile layers (hblanks, GDB)
+static void PS1DrawTileLayerImpl(int layerID);
 static void PS1DrawTileLayer(int layerID) {
+    uint32_t t0 = PS1Hblanks();
+    PS1DrawTileLayerImpl(layerID);
+    g_ps1LayerHbl = g_ps1LayerHbl + PS1HblanksSince(t0);
+}
+static void PS1DrawTileLayerImpl(int layerID) {
     TileLayer *layer = &StageLayouts[activeTileLayers[layerID]];
     if (!layer->xsize || !layer->ysize)
         return;
-    // Visible chunk range (128x128-pixel chunks), clamped to the layer.
-    int cx0 = XScrollOffset >> 7;
-    int cy0 = YScrollOffset >> 7;
-    int cx1 = (XScrollOffset + SCREEN_XSIZE - 1) >> 7;
-    int cy1 = (YScrollOffset + SCREEN_YSIZE - 1) >> 7;
-    if (cx0 < 0)
-        cx0 = 0;
-    if (cy0 < 0)
-        cy0 = 0;
-    if (cx1 >= layer->xsize)
-        cx1 = layer->xsize - 1;
-    if (cy1 >= layer->ysize)
-        cy1 = layer->ysize - 1;
-    for (int cy = cy0; cy <= cy1; ++cy) {
-        for (int cx = cx0; cx <= cx1; ++cx) {
-            int chunkIndex = layer->tiles[cy * TILELAYER_CHUNK_W + cx];
-            for (int sy = 0; sy < 8; ++sy) {
-                int screenY = (cy << 7) + (sy << 4) - YScrollOffset;
-                if (screenY < -16 || screenY >= SCREEN_YSIZE)
-                    continue;
-                for (int sx = 0; sx < 8; ++sx) {
-                    int tile = StageTiles.tileIndex[(chunkIndex << 6) + sx + (sy << 3)];
-                    if (tile == 0)
-                        continue;
-                    int screenX = (cx << 7) + (sx << 4) - XScrollOffset;
-                    if (screenX < -16 || screenX >= SCREEN_XSIZE)
-                        continue;
-                    PS1DrawTileQuad(screenX, screenY, tile);
-                }
-            }
+    if (layer->type != LAYER_HSCROLL) // VScroll / 3D cloud: not used by Sonic Nexus (phase 3c scope)
+        return;
+    int yscrollOffset = SetupHLineScrollLayer(layerID);
+    bool bgLayer      = activeTileLayers[layerID] != 0;
+    int *deformationData, *deformationDataW;
+    if (bgLayer) {
+        deformationData  = &BGDeformationData3[(byte)(yscrollOffset + DeformationPos3)];
+        deformationDataW = &BGDeformationData4[(byte)(yscrollOffset + waterDrawPos + DeformationPos4)];
+    } else {
+        deformationData  = &BGDeformationData1[(byte)(yscrollOffset + DeformationPos1)];
+        deformationDataW = &BGDeformationData2[(byte)(yscrollOffset + waterDrawPos + DeformationPos2)];
+    }
+#if !PS1_DRAW_BG_LAYERS
+    if (bgLayer) // phase 3c step 1: BG layers keep their scroll state but aren't drawn yet
+        return;
+#endif
+    byte above = (byte)(layerID >= tLayerMidPoint);
+    int fullW  = layer->xsize << 7;
+    int fullH  = layer->ysize << 7;
+    int tileYPos = yscrollOffset % fullH;
+    if (tileYPos < 0)
+        tileYPos += fullH;
+    bool ss5Fix = StrComp(stageList[ActiveStageList][StageListPosition].name, "5") && ActiveStageList == STAGELIST_SPECIAL;
+    int waterLines = waterDrawPos < 0 ? 0 : waterDrawPos > SCREEN_YSIZE ? SCREEN_YSIZE : waterDrawPos;
+
+    // Per-line X scroll, exactly the PC loop (above / below the water line). The FG without
+    // deformation scrolls every line by XScrollOffset: one band per tile row, no per-line pass.
+    bool uniform = false;
+    if (!bgLayer) {
+        uniform = true;
+        for (int i = 0; i < HParallax.entryCount && uniform; ++i) uniform = !HParallax.deform[i];
+        if (!HParallax.entryCount)
+            uniform = !HParallax.deform[0];
+    }
+    int ly = tileYPos;
+    if (uniform) {
+        int chunkX = XScrollOffset % fullW;
+        if (chunkX < 0)
+            chunkX += fullW;
+        for (int y = 0; y < SCREEN_YSIZE;) {
+            int h = TILE_SIZE - (ly & 0xF);
+            if (h > SCREEN_YSIZE - y)
+                h = SCREEN_YSIZE - y;
+            PS1DrawTileBand(layer, above, y, h, ly, chunkX, fullW);
+            y += h;
+            ly += h;
+            if (ly >= fullH)
+                ly -= fullH;
         }
+        return;
+    }
+    for (int y = 0; y < SCREEN_YSIZE; ++y) {
+        byte idx   = layer->lineScroll[ly];
+        int chunkX = HParallax.linePos[idx];
+        if (y < waterLines) {
+            if (HParallax.deform[idx]) {
+                int deform = *deformationData;
+                if (ss5Fix)
+                    deform >>= 4;
+                chunkX += deform;
+            }
+            ++deformationData;
+        } else {
+            if (HParallax.deform[idx])
+                chunkX += *deformationDataW;
+            ++deformationDataW;
+        }
+        if (chunkX < 0)
+            chunkX += fullW;
+        if (chunkX >= fullW)
+            chunkX -= fullW;
+        s_ps1LineX[y] = (short)chunkX;
+        if (++ly >= fullH)
+            ly = 0;
+    }
+
+    int stripBands         = 0;
+    int layerIdx           = activeTileLayers[layerID];
+    const uint8_t *stripRow = s_ps1StripCount && layerIdx < LAYER_COUNT ? s_ps1StripRow[layerIdx][above] : nullptr;
+    ly = tileYPos;
+    for (int y = 0; y < SCREEN_YSIZE;) {
+        int chunkX = s_ps1LineX[y];
+        int ri     = stripRow ? stripRow[ly >> 4] : 0;
+        int h      = 1;
+        if (ri) { // strip region: a band runs until the X scroll changes or the region ends
+            const PS1StripRegion &r = s_ps1Strips[ri - 1];
+            int end                 = r.line0 + r.lines;
+            while (y + h < SCREEN_YSIZE && ly + h < end && s_ps1LineX[y + h] == chunkX) ++h;
+            PS1StripBand &b = s_ps1StripBands[stripBands++]; // drawn after the loop, piece by piece
+            b.sy = (short)y, b.h = (short)h, b.ly = (short)ly, b.chunkX = (short)chunkX, b.region = (uint8_t)(ri - 1);
+            y += h;
+            ly += h;
+            if (ly >= fullH)
+                ly -= fullH;
+            continue;
+        }
+        int rowLeft = TILE_SIZE - (ly & 0xF);
+        while (h < rowLeft && y + h < SCREEN_YSIZE && s_ps1LineX[y + h] == chunkX) ++h;
+        PS1DrawTileBand(layer, above, y, h, ly, chunkX, fullW);
+        y += h;
+        ly += h;
+        if (ly >= fullH)
+            ly -= fullH;
+    }
+    // Strip bands, grouped by region and piece (one texpage each).
+    for (int i = 0; i < stripBands;) {
+        int region = s_ps1StripBands[i].region, j = i;
+        while (j < stripBands && s_ps1StripBands[j].region == region) ++j;
+        const PS1StripRegion &r = s_ps1Strips[region];
+        int prims               = 0;
+        for (int k = 0; k < r.pieces; ++k)
+            for (int b = i; b < j; ++b) {
+                const PS1StripBand &sb = s_ps1StripBands[b];
+                prims += PS1DrawStripBand(r, sb.sy, sb.h, sb.ly, sb.chunkX, k);
+            }
+        g_ps1LayerPrims = g_ps1LayerPrims + prims;
+        i = j;
     }
 }
 
@@ -722,7 +1362,16 @@ void SetScreenSize(int width, int lineSize) {
     OBJECT_BORDER_X2    = width + 0x80;
 }
 
+#if RETRO_PLATFORM == RETRO_PS1
+// Verification aid (GDB): bit 0 = drop the primitives of object lists (their draw scripts still
+// run, so game state is unchanged) -> layers-only frames for tools/layer_ref.py.
+volatile uint8_t g_ps1DebugDrawMask = 0;
+#endif
+
 void DrawObjectList(int Layer) {
+#if RETRO_PLATFORM == RETRO_PS1
+    g_ps1ChainSkipPrims = (g_ps1DebugDrawMask & 1) != 0;
+#endif
     int size = ObjectDrawOrderList[Layer].listSize;
     for (int i = 0; i < size; ++i) {
         ObjectLoop = ObjectDrawOrderList[Layer].entityRefs[i];
@@ -740,10 +1389,15 @@ void DrawObjectList(int Layer) {
                 ProcessScript(ObjectScriptList[type].subDraw.scriptCodePtr, ObjectScriptList[type].subDraw.jumpTablePtr, SUB_DRAW);
         }
     }
+#if RETRO_PLATFORM == RETRO_PS1
+    g_ps1ChainSkipPrims = false;
+#endif
 }
 void DrawStageGfx() {
 #if RETRO_PLATFORM == RETRO_PS1
     if (g_ps1GPU) {
+        g_ps1LayerPrims = 0;
+        g_ps1LayerHbl   = 0;
         PS1UploadTileSet();        // once per stage (immediate, waits for the in-flight chain)
         // Chained FastFill of the buffer this frame draws into + chained CLUT uploads; both are
         // rewritten by PS1FinalizePalette() (FlipScreen) with the end-of-frame palette.
@@ -816,7 +1470,14 @@ void DrawStageGfx() {
 
 void GenerateBlendTable(ushort alpha, byte type, byte a3, byte a4) {
 #if RETRO_PLATFORM == RETRO_PS1
-    return; // PS1: no blend LUT; GPU semi-transparency TODO (phase 3c)
+    // No 64 KB LUT: GPU semi-transparency does the 50/50 mix. Type 1 (luminance ramp) keeps, per
+    // source index, the ramp entry of its luminance (palette at call time, like PC).
+    s_blendType = type;
+    for (int i = 0; i < 256; ++i) {
+        int v         = (TilePalette[i].b + TilePalette[i].g + TilePalette[i].r) / 3;
+        s_blendIdx[i] = type == 1 ? (byte)(a4 + a3 * v / 0x100) : (byte)i;
+    }
+    (void)alpha;
 #else
     switch (type) {
         case 0:
@@ -905,46 +1566,16 @@ void DrawHLineScrollLayer(int layerID) {
     int layerheight    = layer->ysize;
     bool aboveMidPoint = layerID >= tLayerMidPoint;
 
-    byte *lineScroll;
-    int *deformationData;
-    int *deformationDataW;
-
-    int yscrollOffset = 0;
+    int yscrollOffset      = SetupHLineScrollLayer(layerID);
+    byte *lineScroll       = layer->lineScroll;
+    int *deformationData   = NULL;
+    int *deformationDataW  = NULL;
     if (activeTileLayers[layerID]) { // BG Layer
-        int yScroll    = YScrollOffset * layer->parallaxFactor >> 6;
-        int fullheight = layerheight << 7;
-        layer->scrollPos += layer->scrollSpeed;
-        if (layer->scrollPos > fullheight << 16)
-            layer->scrollPos -= fullheight << 16;
-        yscrollOffset    = (yScroll + (layer->scrollPos >> 16)) % fullheight;
-        layerheight      = fullheight >> 7;
-        lineScroll       = layer->lineScroll;
         deformationData  = &BGDeformationData3[(byte)(yscrollOffset + DeformationPos3)];
         deformationDataW = &BGDeformationData4[(byte)(yscrollOffset + waterDrawPos + DeformationPos4)];
     } else { // FG Layer
-        LastXSize     = layer->xsize;
-        yscrollOffset = YScrollOffset;
-        lineScroll    = layer->lineScroll;
-        for (int i = 0; i < PARALLAX_COUNT; ++i) HParallax.linePos[i] = XScrollOffset;
         deformationData  = &BGDeformationData1[(byte)(yscrollOffset + DeformationPos1)];
         deformationDataW = &BGDeformationData2[(byte)(yscrollOffset + waterDrawPos + DeformationPos2)];
-    }
-
-    if (layer->type == LAYER_HSCROLL) {
-        if (LastXSize != layerwidth) {
-            int fullLayerwidth = layerwidth << 7;
-            for (int i = 0; i < HParallax.entryCount; ++i) {
-                HParallax.linePos[i] = XScrollOffset * HParallax.parallaxFactor[i] >> 7;
-                HParallax.scrollPos[i] += HParallax.scrollSpeed[i];
-                if (HParallax.scrollPos[i] > fullLayerwidth << 16)
-                    HParallax.scrollPos[i] -= fullLayerwidth << 16;
-                if (HParallax.scrollPos[i] < 0)
-                    HParallax.scrollPos[i] += fullLayerwidth << 16;
-                HParallax.linePos[i] += HParallax.scrollPos[i] >> 16;
-                HParallax.linePos[i] %= fullLayerwidth;
-            }
-        }
-        LastXSize = layerwidth;
     }
 
     byte *pixelBufferPtr = Engine.FrameBuffer;
@@ -1998,9 +2629,6 @@ void DrawVLineScrollLayer(int layerID) {
 void Draw3DCloudLayer(int layerID) { TileLayer *layer = &StageLayouts[activeTileLayers[layerID]]; }
 
 void DrawTintRect(int XPos, int YPos, int width, int height, byte tintID) {
-#if RETRO_PLATFORM == RETRO_PS1
-    return; // PS1: software rasteriser output is never displayed; GPU path TODO (phase 3c)
-#endif
     if (width + XPos > SCREEN_XSIZE)
         width = SCREEN_XSIZE - XPos;
     if (XPos < 0) {
@@ -2016,6 +2644,11 @@ void DrawTintRect(int XPos, int YPos, int width, int height, byte tintID) {
     }
     if (width < 0 || height < 0)
         return;
+#if RETRO_PLATFORM == RETRO_PS1
+    if (g_ps1GPU)
+        PS1TintRect(XPos, YPos, width, height, tintID);
+    return;
+#endif
 
     byte *tintTable = NULL;
     switch (tintID) {
@@ -2041,7 +2674,17 @@ void DrawTintRect(int XPos, int YPos, int width, int height, byte tintID) {
 void DrawScaledTintMask(int direction, int XPos, int YPos, int pivotX, int pivotY, int scaleX, int scaleY, int width, int height, int sprX, int sprY,
                         int tintID, int sheetID) {
 #if RETRO_PLATFORM == RETRO_PS1
-    return; // PS1: software rasteriser output is never displayed; GPU path TODO (phase 3c)
+    // Part of a tint sequence (title card colour circle): its texels stay tinted inside the
+    // untinted window (PS1FinishTint). On its own it is not modelled.
+    if (s_tintSeq == 0 && g_ps1GPU && s_palReserved) // a mask on its own (window larger than the screen)
+        PS1TintBegin(tintID);
+    if (s_tintSeq == 1 && !s_tintMaskPending) {
+        s_tintMask        = PS1TintMaskRec{direction, XPos, YPos, pivotX, pivotY, scaleX, scaleY, width, height, sprX, sprY, sheetID};
+        s_tintMaskPending = true;
+    } else {
+        g_ps1TintIgnored = g_ps1TintIgnored + 1;
+    }
+    return;
 #endif
     int roundedYPos = 0;
     int roundedXPos = 0;
@@ -2288,60 +2931,37 @@ void DrawSpriteClipped(int XPos, int YPos, int width, int height, int sprX, int 
     }
 }
 
-void DrawScaledSprite(int direction, int XPos, int YPos, int pivotX, int pivotY, int scaleX, int scaleY, int width, int height, int sprX, int sprY,
-                      int sheetID) {
-#if RETRO_PLATFORM == RETRO_PS1
-    // GPU path: one textured quad. Same placement maths as the software version below
-    // (512 = 1.0). The quad is clipped to the screen at texel boundaries so its vertices stay
-    // within one scaled texel of the screen (the GPU refuses polygons wider than 1023 or
-    // taller than 511; the intro zooms 256x160 to 3.5x) and the UVs stay exact integers.
-    if (!g_ps1GPU)
+// One piece of a scaled frame: frame texels [fx0, fx1) x [fy0, fy1), frame texel f at u = uBase + f,
+// v = vBase + f in its texture page. The frame covers screen (x0, y0, w, h); [vx0, vx1) x [vy0, vy1)
+// is its visible texel range in screen order. The quad is clipped at texel boundaries (so its
+// vertices stay near the screen: the GPU refuses polygons wider than 1023 or taller than 511) and
+// its UVs stay exact integers.
+static void PS1ScaledPiece(GFXSurface *surf, const PS1AtlasCluster *cl, int texPage, int texPageY, int uBase, int vBase, int direction,
+                           int x0, int y0, int w, int h, int width, int height, int vx0, int vx1, int vy0, int vy1, int fx0, int fx1, int fy0,
+                           int fy1) {
+    int sa = direction == FLIP_X ? width - fx1 : fx0, sb = direction == FLIP_X ? width - fx0 : fx1; // screen order
+    int a = sa > vx0 ? sa : vx0, b = sb < vx1 ? sb : vx1;
+    int ta = fy0 > vy0 ? fy0 : vy0, tb = fy1 < vy1 ? fy1 : vy1;
+    if (a >= b || ta >= tb)
         return;
-    GFXSurface *surf = &GfxSurface[sheetID];
-    if (width <= 0 || height <= 0)
+    if (s_ps1QuadMaskMode && (!cl || cl->depth != 4)) { // mask CLUT exists for 4-bit clusters only
+        g_ps1TintMaskSkip = g_ps1TintMaskSkip + 1;
         return;
-    int texPage, texPageY, u0, v0;
-    const PS1AtlasCluster *cl = nullptr;
-    if (surf->vramDirect15) {
-        texPage = surf->vramPageX, texPageY = surf->vramPageY, u0 = sprX, v0 = sprY;
-    } else {
-        if (surf->atlasSheet < 0 || !(cl = PS1FindCluster(surf->atlasSheet, sprX, sprY)))
-            return;
-        texPage = cl->tpageX, texPageY = cl->tpageY;
-        u0 = cl->u + sprX - cl->srcX, v0 = cl->v + sprY - cl->srcY;
-        if (sprX + width > cl->srcX + cl->w || sprY + height > cl->srcY + cl->h)
-            return; // frame split across clusters: not needed scaled by any v2 script
     }
-    if (u0 + width > 256 || v0 + height > 256)
-        return;
-    int sx = 4 * scaleX, sy = 4 * scaleY;
-    if (sx <= 0 || sy <= 0)
-        return;
-    int x0 = XPos - (sx * pivotX >> 11), y0 = YPos - (sy * pivotY >> 11);
-    int w = sx * width >> 11, h = sy * height >> 11;
-    if (w <= 0 || h <= 0 || x0 >= SCREEN_XSIZE || y0 >= SCREEN_YSIZE || x0 + w <= 0 || y0 + h <= 0)
-        return;
-    // Visible texel range [t0, t1) per axis; screen edge of texel t: x0 + t * w / width.
-    int tx0 = x0 < 0 ? (-x0 * width) / w : 0;
-    int tx1 = x0 + w > SCREEN_XSIZE ? ((SCREEN_XSIZE - x0) * width + w - 1) / w : width;
-    int ty0 = y0 < 0 ? (-y0 * height) / h : 0;
-    int ty1 = y0 + h > SCREEN_YSIZE ? ((SCREEN_YSIZE - y0) * height + h - 1) / h : height;
-    if (tx1 > width) tx1 = width;
-    if (ty1 > height) ty1 = height;
-    int qx0 = x0 + tx0 * w / width, qx1 = x0 + tx1 * w / width;
-    int qy0 = y0 + ty0 * h / height, qy1 = y0 + ty1 * h / height;
+    int qx0 = x0 + a * w / width, qx1 = x0 + b * w / width;
+    int qy0 = y0 + ta * h / height, qy1 = y0 + tb * h / height;
     if (qx1 <= qx0 || qy1 <= qy0)
         return;
     int uL, uR; // FLIP_X mirrors the texels: screen-left shows the sprite's right edge
     if (direction == FLIP_X) {
-        uL = u0 + width - tx0;
-        uR = u0 + width - tx1;
+        uL = uBase + width - a;
+        uR = uBase + width - b;
     } else {
-        uL = u0 + tx0;
-        uR = u0 + tx1;
+        uL = uBase + a;
+        uR = uBase + b;
     }
     auto clampU = [](int u) { return (uint8_t)(u > 255 ? 255 : u); }; // 256 doesn't fit a UV byte
-    int vT = v0 + ty0, vB = v0 + ty1;
+    int vT = vBase + ta, vB = vBase + tb;
     uint8_t m = surf->vramDirect15 ? PS1DirectModulation() : 0x80;
     psyqo::Prim::TexturedQuad quad(psyqo::Color{{.r = m, .g = m, .b = m}});
     quad.pointA    = psyqo::Vertex{{.x = (int16_t)qx0, .y = (int16_t)qy0}};
@@ -2358,11 +2978,79 @@ void DrawScaledSprite(int direction, int XPos, int YPos, int pivotX, int pivotY,
     quad.uvC    = psyqo::PrimPieces::UVCoordsPadded{clampU(uL), clampU(vB), 0};
     quad.pointD = psyqo::Vertex{{.x = (int16_t)qx1, .y = (int16_t)qy1}};
     quad.uvD    = psyqo::PrimPieces::UVCoordsPadded{clampU(uR), clampU(vB), 0};
+    if (s_ps1QuadMaskMode) {
+        // Mask-bit marking (PS1FinishTint): every opaque texel -> 0x8000 (STP set) drawn B + F =
+        // unchanged colour, with GP0 E6h "force mask bit" on (set by the caller).
+        quad.clutIndex = psyqo::PrimPieces::ClutIndex(psyqo::Vertex{{.x = PS1_MASK_CLUT_X, .y = PS1_BLEND_MASTER_Y}});
+        quad.tpage.set(psyqo::Prim::TPageAttr::SemiTrans::FullBackAndFullFront);
+        quad.setSemiTrans();
+    }
     PS1ChainQuad(quad);
     if (surf->vramDirect15) {
         int ox0 = qx0 < 0 ? 0 : qx0, oy0 = qy0 < 0 ? 0 : qy0;
         int ox1 = qx1 > SCREEN_XSIZE ? SCREEN_XSIZE : qx1, oy1 = qy1 > SCREEN_YSIZE ? SCREEN_YSIZE : qy1;
         PS1DirectFadeOverlay(ox0, oy0, ox1 - ox0, oy1 - oy0);
+    }
+}
+
+void DrawScaledSprite(int direction, int XPos, int YPos, int pivotX, int pivotY, int scaleX, int scaleY, int width, int height, int sprX, int sprY,
+                      int sheetID) {
+#if RETRO_PLATFORM == RETRO_PS1
+    // GPU path: textured quads, one per atlas cluster the frame spans (one for a 15-bit
+    // surface). Same placement maths as the software version below (512 = 1.0).
+    if (!g_ps1GPU)
+        return;
+    GFXSurface *surf = &GfxSurface[sheetID];
+    if (width <= 0 || height <= 0)
+        return;
+    if (!surf->vramDirect15 && surf->atlasSheet < 0)
+        return;
+    int sx = 4 * scaleX, sy = 4 * scaleY;
+    if (sx <= 0 || sy <= 0)
+        return;
+    int x0 = XPos - (sx * pivotX >> 11), y0 = YPos - (sy * pivotY >> 11);
+    int w = sx * width >> 11, h = sy * height >> 11;
+    if (w <= 0 || h <= 0 || x0 >= SCREEN_XSIZE || y0 >= SCREEN_YSIZE || x0 + w <= 0 || y0 + h <= 0)
+        return;
+    // Visible texel range [t0, t1) per axis (screen order); screen edge of texel t: x0 + t * w / width.
+    int tx0 = x0 < 0 ? (-x0 * width) / w : 0;
+    int tx1 = x0 + w > SCREEN_XSIZE ? ((SCREEN_XSIZE - x0) * width + w - 1) / w : width;
+    int ty0 = y0 < 0 ? (-y0 * height) / h : 0;
+    int ty1 = y0 + h > SCREEN_YSIZE ? ((SCREEN_YSIZE - y0) * height + h - 1) / h : height;
+    if (tx1 > width) tx1 = width;
+    if (ty1 > height) ty1 = height;
+    if (s_ps1QuadMaskMode) {
+        static const uint16_t s_maskClut[16] = { 0x0000, 0x8000, 0x8000, 0x8000, 0x8000, 0x8000, 0x8000, 0x8000,
+                                                 0x8000, 0x8000, 0x8000, 0x8000, 0x8000, 0x8000, 0x8000, 0x8000 };
+        PS1ChainUploadRow(s_maskClut, 16, PS1_MASK_CLUT_X, PS1_BLEND_MASTER_Y);
+        PS1ChainFlushCache();
+    }
+    if (surf->vramDirect15) {
+        PS1ScaledPiece(surf, nullptr, surf->vramPageX, surf->vramPageY, sprX, sprY, direction, x0, y0, w, h, width, height, tx0, tx1, ty0, ty1, 0,
+                       width, 0, height);
+        return;
+    }
+    // Frames split across atlas clusters: one quad per cluster piece (PS1DrawAtlasRect's walk).
+    struct Rect16 {
+        int16_t x, y, w, h;
+    } stack[16];
+    int sp      = 0;
+    stack[sp++] = Rect16{(int16_t)sprX, (int16_t)sprY, (int16_t)width, (int16_t)height};
+    while (sp) {
+        Rect16 r                 = stack[--sp];
+        const PS1AtlasCluster *c = PS1FindCluster(surf->atlasSheet, r.x, r.y);
+        if (!c)
+            continue;
+        int iw = c->srcX + c->w - r.x, ih = c->srcY + c->h - r.y;
+        if (iw > r.w) iw = r.w;
+        if (ih > r.h) ih = r.h;
+        int fx0 = r.x - sprX, fy0 = r.y - sprY;
+        PS1ScaledPiece(surf, c, c->tpageX, c->tpageY, c->u + (r.x - c->srcX) - fx0, c->v + (r.y - c->srcY) - fy0, direction, x0, y0, w, h, width,
+                       height, tx0, tx1, ty0, ty1, fx0, fx0 + iw, fy0, fy0 + ih);
+        if (r.w > iw && sp < 16)
+            stack[sp++] = Rect16{(int16_t)(r.x + iw), r.y, (int16_t)(r.w - iw), (int16_t)ih};
+        if (r.h > ih && sp < 16)
+            stack[sp++] = Rect16{r.x, (int16_t)(r.y + ih), r.w, (int16_t)(r.h - ih)};
     }
     return;
 #endif
@@ -2643,7 +3331,26 @@ void DrawRotatedSprite(int direction, int XPos, int YPos, int pivotX, int pivotY
 
 void DrawBlendedSprite(int XPos, int YPos, int width, int height, int sprX, int sprY, int sheetID) {
 #if RETRO_PLATFORM == RETRO_PS1
-    return; // PS1: no blend LUT; GPU semi-transparency TODO (phase 3c)
+    if (width + XPos > SCREEN_XSIZE)
+        width = SCREEN_XSIZE - XPos;
+    if (XPos < 0) {
+        sprX -= XPos;
+        width += XPos;
+        XPos = 0;
+    }
+    if (height + YPos > SCREEN_YSIZE)
+        height = SCREEN_YSIZE - YPos;
+    if (YPos < 0) {
+        sprY -= YPos;
+        height += YPos;
+        YPos = 0;
+    }
+    if (width <= 0 || height <= 0 || !g_ps1GPU)
+        return;
+    // PC: BlendLookupTable[dst][src] (SetBlendTable). GPU: B/2 + F/2 with a blend CLUT; exact
+    // for type 0 at alpha 128, and for type 1 when dst already is a ramp colour (see PS1BlendClut).
+    if (GfxSurface[sheetID].atlasSheet >= 0)
+        PS1DrawAtlasRect(GfxSurface[sheetID].atlasSheet, XPos, YPos, width, height, sprX, sprY, s_blendType != 0xFF);
 #else
     if (width + XPos > SCREEN_XSIZE)
         width = SCREEN_XSIZE - XPos;

@@ -65,6 +65,9 @@ void FlipScreen();
 #if RETRO_PLATFORM == RETRO_PS1
 void PS1UploadPalette();
 void PS1FinalizePalette(); // FlipScreen: end-of-frame palette into the chained CLUT uploads
+// Packed per-chunk-tile word for the GPU tile renderer, stored in StageTiles.gfxDataPos:
+// bits 0-15 = u | v << 8 in its tile page, 16-17 page, 18-19 FLIP_*, bit 20 plane, bit 21 non-empty.
+uint32_t PS1TileVisual(int tileIndex, int direction, int visualPlane);
 void PS1ResetSpriteSurfaces(); // stage change: forget VRAM placement of every surface
 void PS1InvalidateTileSet();   // stage change: the new 16x16Tiles.vram is uploaded on the next frame
 void PS1BindSheet(int sheetID); // bind a named surface to the current stage atlas

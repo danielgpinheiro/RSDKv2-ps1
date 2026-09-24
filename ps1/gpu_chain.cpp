@@ -23,15 +23,18 @@
 // over the front grass). Small fragments avoid that path on both.
 #define PS1_CHAIN_MAX_WORDS   14
 #define PS1_TILE_BATCH        4  // 4 * 3 words = 12 <= 14
+#define PS1_SPRITE_BATCH      3  // 3 * 4 words = 12 <= 14
 #define PS1_CLUT_CHUNK        22 // halfwords per CLUT upload chunk: 3 + 11 words = 14 // 84 * 3 words = 252 <= 255-word chained fragment limit
 
 volatile uint32_t g_ps1ChainOverflow  = 0;
 volatile uint32_t g_ps1ChainHighWater = 0;
 volatile uint32_t g_ps1ChainLastWords = 0;
+volatile uint32_t g_ps1ChainReplayWords = 0;
 
 namespace {
 
 typedef psyqo::Fragments::FixedFragment<psyqo::Prim::Sprite16x16, PS1_TILE_BATCH> TileBatch;
+typedef psyqo::Fragments::FixedFragment<psyqo::Prim::Sprite, PS1_SPRITE_BATCH> SpriteBatch;
 
 struct ClutChunkFragment {
     uintptr_t head;                 // psyqo chain link (must be uintptr_t)
@@ -42,13 +45,32 @@ struct ClutChunkFragment {
 };
 static_assert(sizeof(psyqo::Prim::VRAMUpload) / 4 + PS1_CLUT_CHUNK / 2 <= PS1_CHAIN_MAX_WORDS, "CLUT chunk too big");
 static_assert(PS1_TILE_BATCH * sizeof(psyqo::Prim::Sprite16x16) / 4 <= PS1_CHAIN_MAX_WORDS, "tile batch too big");
+static_assert(PS1_SPRITE_BATCH * sizeof(psyqo::Prim::Sprite) / 4 <= PS1_CHAIN_MAX_WORDS, "sprite batch too big");
+
+// A copied fragment (PS1ChainReplay): payload <= PS1_CHAIN_MAX_WORDS like every fragment here.
+struct RawFragment {
+    uintptr_t head;
+    uint32_t data[PS1_CHAIN_MAX_WORDS];
+    unsigned words;
+    size_t getActualFragmentSize() const { return words; }
+};
 
 alignas(4) uint32_t s_arena[2][PS1_CHAIN_ARENA_WORDS];
+void (*s_hook)() = nullptr;
+
+inline void runHook() {
+    if (s_hook) {
+        auto h = s_hook;
+        s_hook = nullptr;
+        h();
+    }
+}
 uint32_t *s_base    = nullptr;
 uint32_t *s_cur     = nullptr;
 uint32_t *s_end     = nullptr;
 psyqo::GPU *s_gpu   = nullptr;
 TileBatch *s_batch  = nullptr; // open tile batch (not yet chained)
+SpriteBatch *s_sbatch = nullptr; // open sprite batch (not yet chained); at most one batch is open
 uint16_t s_lastTPage = 0xFFFF;  // raw TPageAttr of the last chained TPage (0xFFFF = unknown)
 bool s_tpageValid    = false;
 
@@ -70,10 +92,16 @@ void flushBatch() {
             s_gpu->chain(*s_batch);
         s_batch = nullptr;
     }
+    if (s_sbatch) {
+        if (s_sbatch->count)
+            s_gpu->chain(*s_sbatch);
+        s_sbatch = nullptr;
+    }
 }
 
 template <typename Prim>
 void chainSimple(const Prim &prim) {
+    runHook();
     flushBatch();
     auto *frag = allocRaw<psyqo::Fragments::SimpleFragment<Prim>>();
     if (!frag)
@@ -90,7 +118,10 @@ void PS1ChainBegin(psyqo::GPU &gpu) {
     s_cur        = s_base;
     s_end        = s_base + PS1_CHAIN_ARENA_WORDS;
     s_batch      = nullptr;
+    s_sbatch     = nullptr;
     s_tpageValid = false;
+    s_hook       = nullptr;
+    g_ps1ChainReplayWords = 0;
 }
 
 void PS1ChainEnd() {
@@ -118,6 +149,7 @@ psyqo::Prim::FastFill *PS1ChainClear(uint8_t r, uint8_t g, uint8_t b) {
 }
 
 void PS1ChainUploadRow(const uint16_t *data, int count, int16_t x, int16_t y) {
+    runHook();
     flushBatch();
     for (int off = 0; off < count; off += PS1_CLUT_CHUNK) {
         int n    = (count - off < PS1_CLUT_CHUNK) ? (count - off) : PS1_CLUT_CHUNK; // 256 = 22 x 11 + 14
@@ -133,6 +165,7 @@ void PS1ChainUploadRow(const uint16_t *data, int count, int16_t x, int16_t y) {
 }
 
 int PS1ChainReserveRow(int count, int16_t x, int16_t y, uint16_t **chunkData, uint16_t *chunkLen, int maxChunks) {
+    runHook();
     flushBatch();
     int chunks = 0;
     for (int off = 0; off < count && chunks < maxChunks; off += PS1_CLUT_CHUNK) {
@@ -182,6 +215,7 @@ void PS1ChainUploadCLUT(const uint16_t *clut256, int16_t x, int16_t y) {
 }
 
 void PS1ChainTPage(psyqo::PrimPieces::TPageAttr attr) {
+    runHook();
     uint16_t raw;
     static_assert(sizeof(attr) == sizeof(raw), "TPageAttr is 16 bits");
     memcpy(&raw, &attr, sizeof(raw));
@@ -196,9 +230,14 @@ void PS1ChainTPage(psyqo::PrimPieces::TPageAttr attr) {
 
 void PS1ChainInvalidateTPage() { s_tpageValid = false; }
 
+bool g_ps1ChainSkipPrims = false;
+
 void PS1ChainSprite16(const psyqo::Prim::Sprite16x16 &s) {
+    if (g_ps1ChainSkipPrims)
+        return;
+    runHook();
     if (!s_batch || s_batch->count >= PS1_TILE_BATCH) {
-        flushBatch();
+        flushBatch(); // also closes an open sprite batch (keeps the draw order)
         s_batch = allocRaw<TileBatch>();
         if (!s_batch)
             return;
@@ -208,11 +247,102 @@ void PS1ChainSprite16(const psyqo::Prim::Sprite16x16 &s) {
     s_batch->primitives[s_batch->count++] = s;
 }
 
-void PS1ChainSprite(const psyqo::Prim::Sprite &s) { chainSimple(s); }
+void PS1ChainSprite16Raw(uint32_t xy, uint32_t tex) {
+    static const uint32_t cmd = [] {
+        psyqo::Prim::Sprite16x16 s(psyqo::Color{{.r = 0x80, .g = 0x80, .b = 0x80}});
+        uint32_t w;
+        memcpy(&w, &s, 4);
+        return w;
+    }();
+    if (g_ps1ChainSkipPrims)
+        return;
+    runHook();
+    if (!s_batch || s_batch->count >= PS1_TILE_BATCH) {
+        flushBatch();
+        s_batch = allocRaw<TileBatch>();
+        if (!s_batch)
+            return;
+        new (s_batch) TileBatch();
+        s_batch->count = 0;
+    }
+    uint32_t *w = reinterpret_cast<uint32_t *>(&s_batch->primitives[s_batch->count++]);
+    w[0]        = cmd;
+    w[1]        = xy;
+    w[2]        = tex;
+}
 
-void PS1ChainRect(const psyqo::Prim::Rectangle &r) { chainSimple(r); }
+void PS1ChainSprite(const psyqo::Prim::Sprite &s) {
+    if (g_ps1ChainSkipPrims)
+        return;
+    runHook();
+    if (!s_sbatch || s_sbatch->count >= PS1_SPRITE_BATCH) {
+        flushBatch();
+        s_sbatch = allocRaw<SpriteBatch>();
+        if (!s_sbatch)
+            return;
+        new (s_sbatch) SpriteBatch();
+        s_sbatch->count = 0;
+    }
+    s_sbatch->primitives[s_sbatch->count++] = s;
+}
+
+void PS1ChainRect(const psyqo::Prim::Rectangle &r) {
+    if (!g_ps1ChainSkipPrims)
+        chainSimple(r);
+}
 
 void PS1ChainQuad(const psyqo::Prim::TexturedQuad &q) {
+    if (g_ps1ChainSkipPrims)
+        return;
     chainSimple(q);
     s_tpageValid = false; // a textured polygon's texpage attribute changes the GPU draw mode
 }
+
+uint32_t *PS1ChainMark() {
+    flushBatch();
+    return s_cur;
+}
+
+int PS1ChainReplay(uint32_t *from, uint32_t *to) {
+    flushBatch();
+    int words = 0;
+    uint32_t *p = from;
+    for (int guard = 0; p && p != to && p >= s_base && p < s_end && guard < 4096; ++guard) {
+        uint32_t head = *p;
+        unsigned n    = head >> 24;
+        uint32_t *next = reinterpret_cast<uint32_t *>(0x80000000u | (head & 0xffffff));
+        if (n && n <= PS1_CHAIN_MAX_WORDS && (p[1] >> 24) != 0xA0) { // skip CPU->VRAM uploads (CLUT rows)
+            auto *f = allocRaw<RawFragment>();
+            if (!f)
+                break;
+            memcpy(f->data, p + 1, n * 4);
+            f->words = n;
+            s_gpu->chain(*f);
+            words += n + 1;
+        }
+        p = next;
+    }
+    g_ps1ChainReplayWords = g_ps1ChainReplayWords + words;
+    s_tpageValid = false;
+    return words;
+}
+
+static int16_t chainBufferY() { // the buffer this frame's chain draws into (psyqo getNextScissor)
+    return s_gpu->getParity() ? 0 : 256;
+}
+
+void PS1ChainDrawArea(int x0, int y0, int x1, int y1) {
+    int16_t by = chainBufferY();
+    chainSimple(psyqo::Prim::DrawingAreaStart(psyqo::Vertex{{.x = (int16_t)x0, .y = (int16_t)(by + y0)}}));
+    chainSimple(psyqo::Prim::DrawingAreaEnd(psyqo::Vertex{{.x = (int16_t)x1, .y = (int16_t)(by + y1)}}));
+}
+
+void PS1ChainDrawAreaReset() { PS1ChainDrawArea(0, 0, 320, 240); }
+
+void PS1ChainMaskControl(bool forceSet, bool test) {
+    chainSimple(psyqo::Prim::MaskControl(forceSet ? psyqo::Prim::MaskControl::ForceSet : psyqo::Prim::MaskControl::FromSource,
+                                         test ? psyqo::Prim::MaskControl::Test::Yes : psyqo::Prim::MaskControl::Test::No));
+}
+
+void PS1ChainSetHook(void (*fn)()) { s_hook = fn; }
+void PS1ChainRunHook() { runHook(); }

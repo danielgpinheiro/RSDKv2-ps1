@@ -621,7 +621,11 @@ void Load128x128Mappings() {
             entry[0] -= 4 * (entry[0] >> 2);
 
             StageTiles.tileIndex[i]  = entry[1] + (entry[0] << 8);
+#if RETRO_PLATFORM == RETRO_PS1
+            StageTiles.gfxDataPos[i] = (int)PS1TileVisual(StageTiles.tileIndex[i], StageTiles.direction[i], StageTiles.visualPlane[i]);
+#else
             StageTiles.gfxDataPos[i] = StageTiles.tileIndex[i] << 8;
+#endif
 
             StageTiles.collisionFlags[0][i] = entry[2] >> 4;
             StageTiles.collisionFlags[1][i] = entry[2] - ((entry[2] >> 4) << 4);

@@ -28,6 +28,11 @@ volatile uint32_t g_ps1PerfVideoMaxVsyncs  = 0; // slowest of those (1 = 60 fps)
 volatile uint32_t g_ps1PerfVideoSlow       = 0; // those that took more than 1 vsync
 volatile uint32_t g_ps1HeapVideoHeadroom   = 0; // heap headroom right after the last video frame
 volatile uint32_t g_ps1PerfVideoMaxHbl     = 0; // longest frame() CPU time while a video plays (hblanks, 262 = 1 frame)
+volatile uint32_t g_ps1PerfLastHbl         = 0; // frame() CPU time of the last frame (hblanks)
+volatile uint32_t g_ps1PerfMaxHbl          = 0; // longest frame() CPU time (hblanks; GDB may reset it)
+volatile uint32_t g_ps1PerfOverHbl         = 0; // frames whose CPU time exceeded one frame (262 hblanks)
+extern volatile uint32_t g_ps1LayerHbl;
+volatile uint32_t g_ps1PerfMaxLayerHbl     = 0; // tile-layer CPU time in the longest frame
 static bool       s_ps1PerfVideoTick       = false;
 
 __attribute__((noinline)) static void PS1PerfTick(psyqo::GPU &gpu) {
@@ -183,8 +188,15 @@ class RSDKv2PS1App final : public psyqo::Application {
         PS1ChainBegin(gpu()); // all per-frame drawing is DMA-chained (ps1/gpu_chain.hh)
         Engine.RunFrame();
         PS1ChainEnd();        // psyqo sends the chain after frame() returns
+        uint32_t cpu     = PS1HblanksSince(t0);
+        g_ps1PerfLastHbl = cpu;
+        if (cpu > g_ps1PerfMaxHbl) {
+            g_ps1PerfMaxHbl      = cpu;
+            g_ps1PerfMaxLayerHbl = g_ps1LayerHbl;
+        }
+        if (cpu > 262)
+            g_ps1PerfOverHbl = g_ps1PerfOverHbl + 1;
         if (s_ps1PerfVideoTick && PS1VideoIsOpen()) {
-            uint32_t cpu = PS1HblanksSince(t0);
             if (cpu > g_ps1PerfVideoMaxHbl)
                 g_ps1PerfVideoMaxHbl = cpu;
         }
