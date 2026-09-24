@@ -73,7 +73,6 @@ void PS1InvalidateTileSet();   // stage change: the new 16x16Tiles.vram is uploa
 void PS1BindSheet(int sheetID); // bind a named surface to the current stage atlas
 void PS1BindAllSheets();        // after an atlas load (player sheets persist across stages)
 bool PS1AllocDirectSurface(int sheetID); // 15-bit surface: the atlas' reserved FMV page
-void PS1TileSelfTest();
 #endif
 void ReleaseRenderDevice();
 

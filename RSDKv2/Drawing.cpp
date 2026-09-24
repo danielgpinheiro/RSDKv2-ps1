@@ -733,12 +733,6 @@ uint32_t PS1TileVisual(int tileIndex, int direction, int visualPlane) {
            | (visualPlane ? PS1_TV_PLANE : 0) | PS1_TV_SOLID;
 }
 
-// Phase-2 tile self-test helper: one full unflipped tile.
-static void PS1DrawTileQuad(int screenX, int screenY, int tileIndex) {
-    if (tileIndex > 0)
-        PS1DrawTilePiece(screenX, screenY, tileIndex, 0, TILE_SIZE, FLIP_NONE);
-}
-
 // One band: screen lines [sy, sy + h) showing layer lines [ly, ly + h) (inside one tile row)
 // scrolled to chunkX. Lines off the top/bottom of the screen are free to draw (the GPU clips
 // them), so a band touching a screen edge is extended to whole tile rows (Sprite16x16).
@@ -999,26 +993,6 @@ static void PS1DrawTileLayerImpl(int layerID) {
     }
 }
 
-static bool ps1TileTestInit = false;
-
-// Self-contained tile-path test: fill a synthetic tile, upload it, draw it every
-// frame. Bypasses Engine.Init() and the script VM entirely. Temporary for Phase 2.
-void PS1TileSelfTest() {
-    PS1ChainClear();
-
-    if (!ps1TileTestInit) {
-        TilePalette[181].r = 255; TilePalette[181].g = 0; TilePalette[181].b = 0;   // red
-        TilePalette[153].r = 0;   TilePalette[153].g = 0; TilePalette[153].b = 255; // blue
-        for (int y = 0; y < 16; ++y)
-            for (int x = 0; x < 16; ++x)
-                TileGfx[188 * 256 + y * 16 + x] = (byte)((((x >> 2) + (y >> 2)) & 1) ? 153 : 181);
-        PS1UploadTileSet();
-        ps1TileTestInit = true;
-    }
-
-    PS1UploadPalette();
-    PS1DrawTileQuad(100, 100, 188);
-}
 
 #endif
 

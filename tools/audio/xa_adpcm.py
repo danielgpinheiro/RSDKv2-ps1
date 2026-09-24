@@ -37,3 +37,15 @@ def channel_sectors(xa_bytes, channel, interleave=8):
         s = xa_bytes[i * 2336:(i + 1) * 2336]
         if s[1] == channel and s[2] & 0x04:
             yield s
+
+
+def clear_unused(buf):
+    """Zero what the drive never delivers in 2336-byte Mode 2 records (sub-header + payload):
+    Form 2: the 20 bytes after the 18 x 128-byte sound groups (psx-spx: unused, zero) and the EDC;
+    Form 1: the EDC/ECC area. psxavenc leaves uninitialised memory there, which makes builds
+    irreproducible; mkpsxiso recomputes EDC/ECC on the disc anyway."""
+    b = bytearray(buf)
+    for k in range(0, len(b), 2336):
+        tail = 8 + 2304 if b[k + 2] & 0x20 else 8 + 2048
+        b[k + tail:k + 2336] = bytes(2336 - tail)
+    return b

@@ -10,8 +10,7 @@ RSDKv2-Decompilation (Retro Engine v2, Sonic Nexus 2008) ported to the PS1 with
 
 ## First checks (every session)
 - `git status` / `git log --oneline -10`: uncommitted work may belong to another agent.
-- `RSDKv2/main.cpp` switches: `PS1_VIDEO_TEST` (FMV self-test),
-  `PS1_TILE_TEST`, `PS1_SKIP_SPRITES`. Default build boots naturally (NIntro);
+- Build switches are make variables only (`BOOT=SSZ`, `MEMCARD_TEST=1`). Default build boots naturally (NIntro);
   `make BOOT=SSZ` (after `touch RSDKv2/main.cpp`) forces SSZ Act 1 for the harness.
   Pad 1 (psyqo `AdvancedPad`) drives the game; tests inject input with GDB
   (`g_ps1PadTestMask`) or through the real pad path (`tools/pad.lua`, see `../docs/21` §6b).

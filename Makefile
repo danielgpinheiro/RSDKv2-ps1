@@ -105,6 +105,12 @@ RSDKv2/Drawing.o: CPPFLAGS += -O2
 
 # Build-time RetroScript compiler (host tool) -> per-stage bytecode on the ISO tree.
 # Re-run whenever a .txt script, GameConfig/StageConfig or SCRIPTDATA/JUMPTABLE sizes change.
+# The whole asset pipeline from the original game (tools/build_assets.py): Sonic Nexus Data.bin ->
+# build/iso/Data (+ build/fmv-src, build/manifest). Needs an empty build/iso. Reproducible.
+DATA ?= ../Nexus/Data.bin
+assets:
+	/usr/bin/python3 tools/build_assets.py --data $(DATA) --out .
+
 bytecode:
 	$(MAKE) -C tools/rsdkscript
 	mkdir -p build/iso/Data/Scripts/Bytecode
@@ -144,4 +150,4 @@ icon:
 mcicons:
 	/usr/bin/python3 tools/memcard/build_icons.py
 
-.PHONY: bytecode atlas audio disc dist icon mcicons
+.PHONY: assets bytecode atlas audio disc dist icon mcicons

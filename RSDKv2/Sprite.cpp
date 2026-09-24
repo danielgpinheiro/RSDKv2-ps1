@@ -2,7 +2,6 @@
 
 #if RETRO_PLATFORM == RETRO_PS1
 #include "common/syscalls/syscalls.h"
-extern bool ps1SkipSprites; // set in main.cpp — skip GIF decode to speed tile-test boots
 #endif
 
 struct GifDecoder {
@@ -222,10 +221,7 @@ int AddGraphicsFile(const char *filePath) {
         // Sheets are in the stage's VRAM atlas (built by tools/atlas, loaded by
         // LoadStageFiles): register the name, nothing is read or decoded here.
         StrCopy(GfxSurface[sheetID].fileName, sheetPath);
-        if (ps1SkipSprites)
-            GfxSurface[sheetID].width = GfxSurface[sheetID].height = 0;
-        else
-            PS1BindSheet(sheetID);
+        PS1BindSheet(sheetID);
         return sheetID;
     }
 #endif
@@ -483,8 +479,6 @@ int LoadRSVFile(const char *filePath, byte sheetID) {
     surface->width        = VideoWidth;
     surface->height       = VideoHeight;
     surface->dataPosition = GfxDataPosition; // nothing reserved
-    ramsyscall_printf("[video] '%s' %d frames %dx%d page=%d,%d\n", strPath, VideoFrameCount, VideoWidth, VideoHeight,
-                      surface->vramPageX, surface->vramPageY);
     return true;
 }
 #else

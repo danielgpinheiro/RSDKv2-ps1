@@ -24,7 +24,10 @@ Usage: build_music.py DATA_DIR [--exclude Nexus/Intro.ogg]
 """
 import os, struct, subprocess, sys, tempfile
 
-PSXAVENC = os.path.join(os.path.dirname(__file__), '../../../psxavenc/build/psxavenc')
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import xa_adpcm  # noqa: E402
+
+PSXAVENC = os.environ.get('PSXAVENC') or os.path.join(os.path.dirname(__file__), '../../../psxavenc/build/psxavenc')
 SECTOR = 2336
 INTERLEAVE = 8
 FILE_NO = 1
@@ -89,7 +92,7 @@ def main():
                 out += end_sector(k)
             else:
                 out += filler_sector(coding)
-    open(os.path.join(root, 'Music.xa'), 'wb').write(out)
+    open(os.path.join(root, 'Music.xa'), 'wb').write(xa_adpcm.clear_unused(out))  # reproducible build
     video_tracks = sorted(exclude)
     table = struct.pack('<4sHHI', b'XAM1', len(tracks) + len(video_tracks), INTERLEAVE, len(out) // SECTOR)
     for k, rel in enumerate(tracks):

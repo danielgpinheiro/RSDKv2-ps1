@@ -10,13 +10,9 @@ void PS1McSelfTest(); // ps1/memcard_test.cpp
 #include <psyqo/gpu.hh>
 #include <psyqo/cdrom-device.hh>
 #include <psyqo/advancedpad.hh>
-#include "common/syscalls/syscalls.h"
 #include "../ps1/video.hh"
 #include "../ps1/gpu_chain.hh"
 
-#define PS1_TILE_TEST 0 // TEMP: synthetic tile-path test (Phase 2 verification)
-#define PS1_SKIP_SPRITES 0 // TEMP: skip GIF sprite decode to speed tile-test boots
-#define PS1_VIDEO_TEST 0 // TEMP: FMV Stage 3 — decode+display the first STR frame
 #ifndef PS1_MEMCARD_TEST
 #define PS1_MEMCARD_TEST 0 // `make MEMCARD_TEST=1`: memory card self-test at boot (ps1/memcard_test.cpp)
 #endif
@@ -73,36 +69,7 @@ __attribute__((noinline)) static void PS1PerfTick(psyqo::GPU &gpu) {
 psyqo::GPU         *g_ps1GPU   = nullptr;
 psyqo::AdvancedPad *g_ps1Pad   = nullptr; // Input.cpp ReadInputDevice (PS1 branch)
 psyqo::CDRomDevice *g_ps1CDRom = nullptr;
-bool ps1SkipSprites = PS1_SKIP_SPRITES;
 
-
-static void PS1VideoSelfTestInit() {
-    syscall_puts("[RSDKv2-PS1] video self-test: init + open Intro.str\n");
-    PS1VideoInit();
-    if (!PS1VideoOpen("Data/Sprites/Videos/Intro.str"))
-        syscall_puts("[RSDKv2-PS1] video self-test: FAILED to open Intro.str\n");
-}
-
-static void PS1VideoSelfTest() {
-    // Advance the video as fast as the CD stream delivers frames (poll every tick).
-    int r = PS1VideoNextFrame(); // 1 = decoded, 0 = still reading, -1 = EOF
-    if (r < 0) {
-        // EOF -> loop the video from the start (buffers are freed and re-allocated).
-        PS1VideoClose();
-        if (!PS1VideoOpen("Data/Sprites/Videos/Intro.str"))
-            return;
-    }
-
-    // MDEC emits 16-pixel-wide vertical slices (column-major). Upload each
-    // slice at its x offset instead of treating the buffer as row-major.
-    uint16_t *pix   = PS1VideoPixels();
-    if (!pix)
-        return;
-    unsigned parity = g_ps1GPU->getParity();
-    int16_t  y      = (parity == 0) ? 0 : 256;
-    for (int i = 0; i < 16; i++)
-        g_ps1GPU->uploadToVRAM(pix + i * 160 * 16, psyqo::Rect{{(int16_t)(32 + 16 * i), (int16_t)(y + 40)}, {16, 160}});
-}
 
 class RSDKv2PS1App final : public psyqo::Application {
   public:
@@ -128,14 +95,6 @@ class RSDKv2PS1App final : public psyqo::Application {
     }
 
     void start() override {
-        syscall_puts("[RSDKv2-PS1] boot ok; calling Engine.Init()\n");
-
-#if PS1_TILE_TEST
-        // Synthetic tile test: skip CD-ROM + Engine.Init — the test fills
-        // TileGfx/TilePalette itself. Temporary for Phase 2 verification.
-        return;
-#endif
-
         m_cdrom.resetBlocking(gpu());
         g_ps1CDRom = &m_cdrom;
         // Pads: psyqo::AdvancedPad polls SIO0 itself from psyqo's frame loop. Not SimplePad:
@@ -149,11 +108,6 @@ class RSDKv2PS1App final : public psyqo::Application {
 
 #if PS1_MEMCARD_TEST
         PS1McSelfTest(); // then boot normally (the pad must still work: tools/memcard/selftest.sh)
-#endif
-
-#if PS1_VIDEO_TEST
-        PS1VideoSelfTestInit();
-        return;
 #endif
 
 #if PS1_BOOT_SSZ
@@ -181,21 +135,9 @@ class RSDKv2PS1App final : public psyqo::Application {
         PS1LoadingBegin(); // boot load (scripts, config, global SFX, music table)
         Engine.Init();
         PS1LoadingEnd();
-        syscall_puts("[RSDKv2-PS1] Engine.Init() returned\n");
     }
 
     void frame() override {
-#if PS1_TILE_TEST
-        PS1ChainBegin(gpu());
-        PS1TileSelfTest();
-        PS1ChainEnd();
-        return;
-#endif
-#if PS1_VIDEO_TEST
-        PS1VideoSelfTest();
-        PS1PerfTick(gpu());
-        return;
-#endif
         // FMV: decode + upload the next video frame (immediate VRAM upload, so before the
         // chain starts). Counted only when the video was already open (not its load frame).
         s_ps1PerfVideoTick = PS1VideoIsOpen();

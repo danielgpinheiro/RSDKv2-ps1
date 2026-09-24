@@ -401,15 +401,6 @@ int LoadActFile(const char *ext, int stageID, FileInfo *info) {
     StrAdd(dest, stageList[ActiveStageList][stageID].id);
     StrAdd(dest, ext);
 
-#if RETRO_PLATFORM == RETRO_PS1
-    static bool actLogged = false;
-    if (!actLogged) {
-        actLogged = true;
-        ramsyscall_printf("[act] LoadActFile path='%s' ASL=%d stageID=%d folder='%s' id='%s'\n",
-            dest, ActiveStageList, stageID, stageList[ActiveStageList][stageID].folder,
-            stageList[ActiveStageList][stageID].id);
-    }
-#endif
 
     ConvertStringToInteger(stageList[ActiveStageList][stageID].id, &ActNumber);
 

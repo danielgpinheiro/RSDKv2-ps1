@@ -100,3 +100,7 @@ void PlaySfx(int sfx, bool loop) {}
 void SetFade(byte r, byte g, byte b, ushort a, int start, int end) {}
 void PrintLog(const char *msg, ...) {}
 bool PlayMusic(int track) { return false; }
+// Phase 5 audio hooks the inline audio helpers (Audio.hpp) call; never executed by the compiler.
+void PS1MusicStop() {}
+void PS1MusicPause(bool pause) {}
+void PS1SfxChannelStop(int channel) {}

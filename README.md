@@ -1,79 +1,80 @@
-# RSDKv2 Decompilation
+# RSDKv2 on PlayStation — Sonic Nexus for the original PS1
 
-A complete decompilation of the Retro-Sonic Engine v2.
+A port of the [RSDKv2 decompilation](https://github.com/RSDKModding/RSDKv2-Decompilation) (Retro
+Engine v2, Sonic Nexus 2008) to the original Sony PlayStation, built with
+[psyqo](https://github.com/pcsx-redux/nugget/tree/main/psyqo) and developed against
+[PCSX-Redux](https://github.com/grumpycoders/pcsx-redux). Target: a retail console with **2 MB RAM**.
 
-Without assets from the Sonic Nexus 2008 demo, this decompilation will not run. You can download the game [here](https://info.sonicretro.org/Sonic_Nexus).
+The upstream decompilation README (PC build) is kept as [README-upstream.md](README-upstream.md).
+Players who only want a disc image should use the public
+[Sonic Nexus PS1 ISO Builder](https://github.com/danielgpinheiro/Sonic-Nexus-PS1-ISO-Builder)
+(prebuilt executable + asset tools; you bring the game data).
 
-# Additional Tweaks
-* Added a built in mod loader, allowing to easily create and play mods.
-* There is now a `settings.ini` file that the game uses to load all settings, similar to Sonic Mania.
-* The dev menu can now be accessed from anywhere by pressing the `ESC` key if enabled in the config.
-* The `F12` pause, `F11` step over & fast forward debug features from Sonic Mania have all been ported and are enabled if `devMenu` is enabled in the config.
+## Status
 
-# How to Build
+| Area | State |
+|---|---|
+| Boot, CD file system, game loop | ✅ natural boot: Retro Engine logo → intro video → title → Sunset Shore Zone |
+| Rendering | ✅ fully DMA-chained GPU renderer at 60 fps: tile layers with PC-exact per-line parallax, per-stage sprite atlas in VRAM, rotation/scaling, fades, tint and blend effects |
+| Input | ✅ `psyqo::AdvancedPad` |
+| Audio | ✅ own SPU driver (sound effects as SPU-ADPCM), music as CD-XA streamed by the drive, intro music interleaved in the video |
+| Video | ✅ intro as MDEC/STR with XA audio |
+| Loading | ✅ spinning-Sonic loading icon; read-ahead + load-order disc layout (boot → SSZ ≈ 23 s emulated) |
+| Memory card | ✅ generic save layer (`ps1/memcard.*`) for later ports — Sonic Nexus itself saves nothing |
+| Distribution disc | ✅ trimmed, byte-verified BIN/CUE (`make dist`) |
+| Real hardware | ⏸ not tested yet |
 
-This project uses [CMake](https://cmake.org/), a versatile building system that supports many different compilers and platforms. You can download CMake [here](https://cmake.org/download/). **(Make sure to enable the feature to add CMake to the system PATH during the installation!)**
+Rule of the port: **no asset decoding at runtime.** GIFs, scripts, audio and video are converted
+at build time into formats the PS1 hardware uses directly (4/8-bit VRAM pages, bytecode,
+SPU-ADPCM, CD-XA, MDEC bitstreams).
 
-## Get the source code
+## Building
 
-**DO NOT** download the source code ZIP archive from GitHub, as they do not include the submodules required to build the decompilation.
+Requirements:
+- `mipsel-none-elf-gcc` (C++20) and [nugget](https://github.com/pcsx-redux/nugget) checked out
+  next to this repo (`../nugget`, plain upstream);
+- Python 3 with Pillow and numpy, a C++17 host compiler, ffmpeg/ffprobe,
+  [psxavenc](https://codeberg.org/WonderfulToolchain/psxavenc),
+  [mkpsxiso](https://github.com/Lameguy64/mkpsxiso) (on PATH, or via the `PSXAVENC`/`MKPSXISO`/
+  `FFMPEG`/`FFPROBE`/`CXX` environment variables);
+- the Sonic Nexus 2008 `Data.bin` ([Sonic Retro](https://info.sonicretro.org/Sonic_Nexus));
+- optionally a Sony license file (`LICENSE.DAT`, never committed) for retail consoles.
 
-Instead, you will need to clone the repository using Git, which you can get [here](https://git-scm.com/downloads).
-
-Clone the repo, using:
-`git clone --recursive https://github.com/RSDKModding/RSDKv2-Decompilation`
-
-## Getting dependencies
-
-### Windows
-To handle dependencies, you'll need to install [Visual Studio Community](https://visualstudio.microsoft.com/downloads/) (make sure to install the `Desktop development with C++` package during the installation) and [vcpkg](https://learn.microsoft.com/en-us/vcpkg/get_started/get-started?pivots=shell-cmd#1---set-up-vcpkg) (You only need to follow `1 - Set up vcpkg`).
-
-After installing those, run the following in Command Prompt (make sure to replace `[vcpkg root]` with the path to the vcpkg installation!):
-- `[vcpkg root]\vcpkg.exe install sdl2 libogg libvorbis --triplet=x64-windows-static` (If you're compiling a 32-bit build, replace `x64-windows-static` with `x86-windows-static`.)
-
-Finally, follow the [compilation steps below](#compiling) using `-DCMAKE_TOOLCHAIN_FILE=[vcpkg root]/scripts/buildsystems/vcpkg.cmake -DVCPKG_TARGET_TRIPLET=x64-windows-static -DCMAKE_PREFIX_PATH=[vcpkg root]/installed/x64-windows-static/` as arguments for `cmake -B build`.
-  - Make sure to replace each instance of `[vcpkg root]` with the path to the vcpkg installation!
-  - If you're compiling a 32-bit build, replace each instance of `x64-windows-static` with `x86-windows-static`.
-
-### Mac
-* Clone the repo, follow the instructions in the [depencencies readme for Mac](./dependencies/mac/dependencies.txt) to setup dependencies, then build via the Xcode project.
-
-### Linux
-Install the following dependencies: then follow the [compilation steps below](#compiling):
-- **pacman (Arch):** `sudo pacman -S base-devel cmake sdl2 libogg libvorbis`
-- **apt (Debian/Ubuntu):** `sudo apt install build-essential cmake libsdl2-dev libogg-dev libvorbis-dev`
-- **rpm (Fedora):** `sudo dnf install make gcc cmake sdl2-devel libogg-devel libvorbis-devel zlib-devel`
-- **apk (Alpine/PostmarketOS)** `sudo apk add build-base cmake sdl2-dev libogg-dev libvorbis-dev`
-- Your favorite package manager here, [make a pull request](https://github.com/RSDKModding/RSDKv2-Decompilation/fork)
-
-## Compiling
-
-Compiling is as simple as typing the following in the root repository directory:
-```
-cmake -B build
-cmake --build build --config release
+```bash
+make -j8                                  # rsdkv2.ps-exe (+ .elf, .map); must fit 2 MB
+make assets DATA=/path/to/Data.bin        # whole asset pipeline -> build/iso/Data (reproducible)
+make disc                                 # mkpsxiso BIN/CUE + tools/disc/verify_disc.py
+make dist                                 # build/dist/SonicNexus-PS1.bin/.cue + SHA256SUMS
 ```
 
-The resulting build will be located somewhere in `build/` depending on your system.
+`make BOOT=SSZ` boots straight into Sunset Shore Zone (regression harness);
+`make MEMCARD_TEST=1` builds the memory card self-test. Details of every stage are in the tools'
+docstrings and in [AGENTS.md](AGENTS.md).
 
-The following cmake arguments are available when compiling:
-- Use these by adding `-D[flag-name]=[value]` to the end of the `cmake -B build` command.
+## Testing (PCSX-Redux)
 
-### RSDKv2 flags
-- `FORCE_CASE_INSENSITIVE`: Forces case insensivity when loading files. Takes a boolean, defaults to `off`.
-- `RETRO_MOD_LOADER`: Enables or disables the mod loader. Takes a boolean, defaults to `on`.
-- `RETRO_ORIGINAL_CODE`: Removes any custom code. *A playable game will not be built with this enabled.* Takes a boolean, defaults to `off`.
-- `RETRO_SDL_VERSION`: *Only change this if you know what you're doing.* Switches between using SDL1 or SDL2. Takes an integer of either `1` or `2`, defaults to `2`.
+```bash
+tools/run_test.sh               # BOOT=SSZ build: 60 fps / chain counters over GDB
+tools/frame_capture.sh 41 OUT   # frame 41 VRAM vs tools/baseline/ssz_f41_vram.bin
+tools/load_profile.sh natural LOG   # per-load / per-file CD request profile
+tools/memcard/selftest.sh       # memory card self-test on temporary card images
+```
 
-## Unofficial Branches
-Follow the installation instructions in the readme of each branch.
-* For the **Nintendo Switch**, go to [LittlePlanetCD's fork](https://github.com/LittlePlanetCD/Sonic-Nexus-Switch).
+## Credits
 
-Because these branches are unofficial, we can't provide support for them and they may not be up-to-date.
+- **Retro Engine / RSDK**: Christian "Taxman" Whitehead.
+- **RSDKv2 decompilation**: Rubberduckycooly and RMGRich (RSDKModding).
+- **Sonic Nexus** (2008): the Sonic Nexus team — see [Sonic Retro](https://info.sonicretro.org/Sonic_Nexus).
+- **psyqo / nugget / PCSX-Redux**: the PCSX-Redux authors (MIT). **EASTL**: Electronic Arts (BSD-3).
+- **[ps1-bare-metal](https://github.com/spicyjpeg/ps1-bare-metal)** (SPU and CD-ROM driver model): spicyjpeg (MIT).
+- **psxpress** MDEC/VLC decoder (ported in `ps1/mdec.cpp`): [PSn00bSDK](https://github.com/Lameguy64/PSn00bSDK) contributors (MPL-2.0).
+- **[mkpsxiso](https://github.com/Lameguy64/mkpsxiso)**: Lameguy64 and contributors (GPL-2.0).
+  **[psxavenc](https://codeberg.org/WonderfulToolchain/psxavenc)**: Ben "GreaseMonkey" Russell and Adrian "asie" Siekierka.
+- **[psx-spx](https://psx-spx.consoledev.net/)** hardware documentation: Martin "nocash" Korth and contributors.
+- Loading icon: "Sonic-Spinning" GIF by [SoniczheFan87686](https://tenor.com/en-GB/users/soniczhefan87686).
 
-## Other Platforms
-Currently the only supported platforms are the ones listed above, however the backend uses libogg, libvorbis, & SDL2 to power it, so the codebase is very multiplatform.
-If you're able to, you can clone this repo and port it to a platform not on the list.
+## License
 
-# Contact:
-Join the [Retro Engine Modding Discord Server](https://dc.railgun.works/retroengine) for any extra questions you may need to know about the decompilation or modding it.
+The decompilation license applies ([LICENSE.md](LICENSE.md)): **non-commercial use only**, credit the
+original and decompilation authors, and **no game assets may be distributed** — this repo contains
+none; build them from your own copy of the game. Sonic the Hedgehog is a trademark of SEGA.

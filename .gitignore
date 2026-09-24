@@ -252,3 +252,6 @@ rsdkv2.ps-exe
 rsdkv2.elf
 .hermes/
 rsdkv2.map
+
+# Python
+__pycache__/

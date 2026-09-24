@@ -96,8 +96,6 @@ bool PS1AtlasLoad(const char *folder) {
     g_ps1AtlasFmvY         = h.fmvY;
     g_ps1AtlasBlockBytes   = bytes;
     g_ps1AtlasLoads        = g_ps1AtlasLoads + 1;
-    ramsyscall_printf("[atlas] %s: %d sheets, %d clusters, %d CLUTs, %u bytes to VRAM\n", path, h.sheets, h.clusters,
-                      h.cluts, (unsigned)bytes);
     return true;
 }
 

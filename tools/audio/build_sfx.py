@@ -14,7 +14,7 @@ Usage: build_sfx.py DATA_DIR   (e.g. build/iso/Data; needs psxavenc + ffmpeg)
 """
 import os, struct, subprocess, sys, tempfile
 
-PSXAVENC = os.path.join(os.path.dirname(__file__), '../../../psxavenc/build/psxavenc')
+PSXAVENC = os.environ.get('PSXAVENC') or os.path.join(os.path.dirname(__file__), '../../../psxavenc/build/psxavenc')
 SPU_SAMPLE_START = 0x1000
 SPU_SAMPLE_END = 0x80000 - 32
 RATES = (44100, 32000, 22050)
