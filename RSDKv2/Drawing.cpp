@@ -69,6 +69,7 @@ static int SetupHLineScrollLayer(int layerID) {
 #include <psyqo/primitives/quads.hh>
 #include <psyqo/primitives/sprites.hh>
 #include "../ps1/gpu_chain.hh"
+#include "../ps1/loading.hh"
 #include "../ps1/video.hh" // PS1Hblanks (layer profiling)
 
 // VRAM layout (1MB, 1024x512 16-bit halfwords):
@@ -629,6 +630,7 @@ void PS1UploadTileSet() {
         return;
     SetFilePosition(4 + 768); // skip width/height + palette
     PS1GpuImmediate();        // immediate VRAM uploads: wait for the in-flight DMA chain
+    PS1LoadingBegin();        // tile set + BG strips: part of the stage load (first frame)
     const int pageCount = TILE_COUNT / 256; // 4 (1024 tiles)
     for (int page = 0; page < pageCount; ++page) {
         FileRead(TileGfx, 0x10000);
@@ -639,6 +641,7 @@ void PS1UploadTileSet() {
     CloseFile();
     PS1LoadBGStrips();
     PS1BuildChunkRowPlanes();
+    PS1LoadingEnd();
     ps1TileSetUploaded = true;
 }
 

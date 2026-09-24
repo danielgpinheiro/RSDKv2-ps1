@@ -3,6 +3,7 @@
 #if RETRO_PLATFORM == RETRO_PS1
 #include "common/syscalls/syscalls.h"
 #include "../ps1/sprite_atlas.hh"
+#include "../ps1/loading.hh"
 #include "../ps1/gpu_chain.hh"
 extern psyqo::GPU *g_ps1GPU;
 #endif
@@ -103,7 +104,13 @@ void ProcessStage(void) {
             MilliSeconds  = 0;
             Seconds       = 0;
             Minutes       = 0;
+#if RETRO_PLATFORM == RETRO_PS1
+            PS1LoadingBegin(); // spinning Sonic in the corner if the load takes > 250 ms
             LoadStageFiles();
+            PS1LoadingEnd();
+#else
+            LoadStageFiles();
+#endif
             for (int i = 0; i < PLAYER_COUNT; ++i) {
                 PlayerList[i].visible           = true;
                 PlayerList[i].state             = 0;

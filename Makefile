@@ -50,6 +50,7 @@ ps1/cdrom_stream.cpp \
 ps1/sprite_atlas.cpp \
 ps1/spu.cpp \
 ps1/xa_music.cpp \
+ps1/loading.cpp \
 
 # Engine include dir (belt-and-suspenders; quote-includes resolve relative to the .cpp anyway).
 # ps1/libc comes FIRST: its C/C++ shim headers (<string>, <cmath>, <stdio.h>, ...)
@@ -116,4 +117,9 @@ audio:
 disc:
 	/usr/bin/python3 tools/disc/build_disc.py
 
-.PHONY: bytecode atlas audio disc
+# Loading icon (phase 5b): ../sonic-spinning.gif -> ps1/loading_icon.h (committed; rerun after
+# changing the GIF).
+icon:
+	/usr/bin/python3 tools/loading/build_icon.py
+
+.PHONY: bytecode atlas audio disc icon

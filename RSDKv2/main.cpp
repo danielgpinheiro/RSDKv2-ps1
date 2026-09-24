@@ -1,3 +1,4 @@
+#include "../ps1/loading.hh"
 #include "RetroEngine.hpp"
 
 #if RETRO_PLATFORM == RETRO_PS1
@@ -163,7 +164,9 @@ class RSDKv2PS1App final : public psyqo::Application {
         }
 #endif
 
+        PS1LoadingBegin(); // boot load (scripts, config, global SFX, music table)
         Engine.Init();
+        PS1LoadingEnd();
         syscall_puts("[RSDKv2-PS1] Engine.Init() returned\n");
     }
 
