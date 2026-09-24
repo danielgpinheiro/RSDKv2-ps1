@@ -18,7 +18,7 @@ shell python3 tools/vramshot.py $OUT $BASE
 detach
 GDBEOF
 $PCSX -run -fastboot -interpreter -debugger -gdb -gdb-port 3333 -webserver \
-      -iso build/game.iso -exe rsdkv2.ps-exe >/dev/null 2>&1 &
+      -iso "${DISC:-build/game.cue}" -exe rsdkv2.ps-exe >/dev/null 2>&1 &
 sleep 3
 timeout 600 $GDB --batch -x /tmp/frame_capture.gdb 2>&1 | grep -E "CAPTURE|fb[01]"
 pkill -f PCSX-Redux

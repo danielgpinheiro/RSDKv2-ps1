@@ -72,7 +72,7 @@ done
 echo detach
 } > /tmp/layer_capture.gdb
 $PCSX -run -fastboot -interpreter -debugger -gdb -gdb-port 3333 -webserver \
-      -iso build/game.iso -exe rsdkv2.ps-exe >/dev/null 2>&1 &
+      -iso "${DISC:-build/game.cue}" -exe rsdkv2.ps-exe >/dev/null 2>&1 &
 sleep 3
 timeout 1500 $GDB --batch -x /tmp/layer_capture.gdb 2>&1 | grep -E "CAPTURE|fb[01]|rror"
 pkill -f PCSX-Redux

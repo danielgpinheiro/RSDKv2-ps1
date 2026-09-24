@@ -7,7 +7,7 @@ PCSX=/Applications/PCSX-Redux.app/Contents/MacOS/PCSX-Redux
 GDB=/opt/homebrew/bin/gdb
 pkill -f PCSX-Redux 2>/dev/null; sleep 1
 $PCSX -run -fastboot -interpreter -debugger -gdb -gdb-port 3333 -webserver \
-      -iso build/game.iso -exe rsdkv2.ps-exe -stdout -logfile "$OUT.log" >/dev/null 2>&1 &
+      -iso "${DISC:-build/game.cue}" -exe rsdkv2.ps-exe -stdout -logfile "$OUT.log" >/dev/null 2>&1 &
 sleep "$BOOT"
 timeout 20 $GDB --batch -x tools/perf.gdb 2>/dev/null | grep -E "PERF|CHAIN|CPU"
 sleep "$WIN"
