@@ -25,12 +25,42 @@ extern psyqo::GPU         *g_ps1GPU;
 
 #define ISO_SECTOR 2048
 #define SECTOR_BATCH 16 /* read up to 16 consecutive sectors (32KB) per blocking call */
+#define DIRECT_MAX   32 /* sector-aligned reads straight into the caller's buffer: up to 64KB per call */
 
-static uint8_t s_sec[ISO_SECTOR];
+static uint8_t *s_sec;
 static uint8_t s_batch[SECTOR_BATCH * ISO_SECTOR];
 
+/* findFile reads the volume descriptor and every directory on the path for each fopen; the disc
+ * is read-only, so those sectors are cached (LRU) instead of costing a blocking CD request each. */
+#define DIR_CACHE 8
+static uint8_t s_dirCache[DIR_CACHE][ISO_SECTOR];
+static uint32_t s_dirCacheLba[DIR_CACHE];
+static uint32_t s_dirCacheAge[DIR_CACHE];
+static uint32_t s_dirCacheClock = 0;
+volatile uint32_t g_ps1FsDirReads = 0; // directory sectors read from the CD (cache misses, GDB)
+volatile uint32_t g_ps1FsDirHits  = 0;
+
 static bool readSector(uint32_t lba) {
-    return g_ps1CDRom->readSectorsBlocking(lba, 1, s_sec, *g_ps1GPU);
+    int victim = 0;
+    for (int i = 0; i < DIR_CACHE; ++i) {
+        if (s_dirCacheAge[i] && s_dirCacheLba[i] == lba) {
+            s_dirCacheAge[i] = ++s_dirCacheClock;
+            s_sec            = s_dirCache[i];
+            g_ps1FsDirHits   = g_ps1FsDirHits + 1;
+            return true;
+        }
+        if (s_dirCacheAge[i] < s_dirCacheAge[victim])
+            victim = i;
+    }
+    if (!g_ps1CDRom->readSectorsBlocking(lba, 1, s_dirCache[victim], *g_ps1GPU)) {
+        s_dirCacheAge[victim] = 0;
+        return false;
+    }
+    s_dirCacheLba[victim] = lba;
+    s_dirCacheAge[victim] = ++s_dirCacheClock;
+    s_sec                 = s_dirCache[victim];
+    g_ps1FsDirReads       = g_ps1FsDirReads + 1;
+    return true;
 }
 
 static uint32_t le32(const uint8_t *p) {
@@ -166,6 +196,20 @@ size_t fread(void *ptr, size_t size, size_t nmemb, FILE *f) {
     while (remaining > 0) {
         uint32_t sector     = f->lba + (f->pos / ISO_SECTOR);
         uint32_t off        = f->pos % ISO_SECTOR;
+        // Whole sectors into an aligned destination: one blocking read (one seek) straight into
+        // it, up to DIRECT_MAX sectors. Every readSectorsBlocking call costs a Setloc/ReadN/Pause
+        // cycle, so few big reads are much faster than many small ones.
+        if (off == 0 && remaining >= ISO_SECTOR && !((uintptr_t)dst & 3)) {
+            uint32_t n = (uint32_t)(remaining / ISO_SECTOR);
+            if (n > DIRECT_MAX)
+                n = DIRECT_MAX;
+            if (!g_ps1CDRom->readSectorsBlocking(sector, n, dst, *g_ps1GPU))
+                break;
+            dst += n * ISO_SECTOR;
+            f->pos += n * ISO_SECTOR;
+            remaining -= n * ISO_SECTOR;
+            continue;
+        }
         uint32_t lastSector = f->lba + (f->size + ISO_SECTOR - 1) / ISO_SECTOR;
         uint32_t sectors    = (off + (uint32_t)remaining + ISO_SECTOR - 1) / ISO_SECTOR;
         if (sectors > SECTOR_BATCH)
