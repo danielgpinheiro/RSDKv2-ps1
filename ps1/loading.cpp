@@ -68,7 +68,26 @@ void restoreBackground() {
     copy(SAVE_X, (int16_t)(hid + SAVE_Y), ICON_X, (int16_t)(s_dispY + ICON_Y), PS1_LOADING_ICON_SIZE, PS1_LOADING_ICON_SIZE);
 }
 
+volatile uint32_t s_reentered = 0; // GDB: ticks skipped because one was already running
+
+void tickBody();
+
+// The blocking uploadToVRAM in the first tick pumps GPU callbacks while it waits, and a periodic
+// timer that fell behind during a long blocking CD read fires again right there: without this
+// guard the nested tick starts a second DMA ("Only one GPU DMA transfer at a time", psyqo abort;
+// seen on Sonic CD's boot load, phase 2.2, and on this port's boot in DuckStation with the retail BIOS).
 void tick() {
+    static bool s_inTick = false;
+    if (s_inTick) {
+        s_reentered = s_reentered + 1;
+        return;
+    }
+    s_inTick = true;
+    tickBody();
+    s_inTick = false;
+}
+
+void tickBody() {
     if (g_ps1GPU->now() - s_start < PS1_LOADING_DELAY_US)
         return;
     if (g_ps1GPU->isChainTransferring())

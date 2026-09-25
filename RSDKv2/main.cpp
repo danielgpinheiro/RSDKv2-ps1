@@ -3,6 +3,7 @@
 #include "../ps1/memcard.hh"
 void PS1McSelfTest(); // ps1/memcard_test.cpp
 #endif
+#include "../ps1/irq_guard.hh"
 #include "RetroEngine.hpp"
 
 #if RETRO_PLATFORM == RETRO_PS1
@@ -97,6 +98,7 @@ class RSDKv2PS1App final : public psyqo::Application {
     void start() override {
         m_cdrom.resetBlocking(gpu());
         g_ps1CDRom = &m_cdrom;
+        PS1IrqGuardInstall(); // re-raises CD / DMA IRQ edges lost to psyqo's I_STAT read-modify-write (ps1/irq_guard.hh)
         // Pads: psyqo::AdvancedPad polls SIO0 itself from psyqo's frame loop. Not SimplePad:
         // the BIOS pad driver (InitPAD/StartPAD) reads both pads inside the vblank IRQ with long
         // busy-waits, and with that in the BIOS IRQ chain psyqo's blocking CD reads aborted
