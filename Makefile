@@ -71,6 +71,15 @@ endif
 ifeq ($(BOOT),SSZ)
 CPPFLAGS += -DPS1_BOOT_SSZ=1
 endif
+
+# `make TEST=1`: the regression test mode (ps1/test_mode.cpp, ../docs/45; the scenario comes from the test disc's
+# Data/TEST.SEL, written by ../tests/run.py): harness only, never for make dist. Rebuilds main.o and relinks when
+# switched (build/gen/test.txt).
+ifeq ($(TEST),1)
+CPPFLAGS += -DPS1_TEST=1
+SRCS += ps1/test_mode.cpp
+endif
+$(shell mkdir -p build/gen; [ -f build/gen/test.txt ] && [ "$$(cat build/gen/test.txt)" = "$(TEST)" ] || { echo "$(TEST)" > build/gen/test.txt; rm -f RSDKv2/main.o rsdkv2.elf; })
 # C++20 is the minimum required by psyqo.
 CXXFLAGS = -std=c++20
 
@@ -137,6 +146,7 @@ disc:
 # Distribution image (phase 9): the verified disc as build/dist/SonicNexus-PS1.bin/.cue (NTSC-U
 # license). Build the natural game first (`make -j8`, not BOOT=SSZ / MEMCARD_TEST).
 dist: disc
+	@if mipsel-none-elf-nm rsdkv2.elf | grep -q g_ps1TestBuild; then echo "dist: rsdkv2.ps-exe is a TEST=1 build"; exit 1; fi
 	mkdir -p build/dist
 	cp build/game.bin build/dist/SonicNexus-PS1.bin
 	printf 'FILE "SonicNexus-PS1.bin" BINARY\n  TRACK 01 MODE2/2352\n    INDEX 01 00:00:00\n' > build/dist/SonicNexus-PS1.cue

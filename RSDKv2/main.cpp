@@ -1,4 +1,5 @@
 #include "../ps1/loading.hh"
+#include "../ps1/test_mode.hh"
 #if PS1_MEMCARD_TEST
 #include "../ps1/memcard.hh"
 void PS1McSelfTest(); // ps1/memcard_test.cpp
@@ -134,8 +135,22 @@ class RSDKv2PS1App final : public psyqo::Application {
         }
 #endif
 
+#if PS1_TEST
+        PS1TestInit(); // TEST.SEL: the scenario (docs/45)
+        if (PS1TestBootStage()) { // as BOOT=SSZ above: manual copies (the libc strcpy may be a stub)
+            const char *f = PS1TestBootFolder(), *id = PS1TestBootId();
+            int b = 0;
+            for (; f[b]; ++b) Engine.startSceneFolder[b] = f[b];
+            Engine.startSceneFolder[b] = 0;
+            for (b = 0; id[b]; ++b) Engine.startSceneID[b] = id[b];
+            Engine.startSceneID[b] = 0;
+        }
+#endif
         PS1LoadingBegin(); // boot load (scripts, config, global SFX, music table)
         Engine.Init();
+#if PS1_TEST
+        PS1TestAfterInit();
+#endif
         PS1LoadingEnd();
     }
 
@@ -149,6 +164,9 @@ class RSDKv2PS1App final : public psyqo::Application {
         PS1ChainBegin(gpu()); // all per-frame drawing is DMA-chained (ps1/gpu_chain.hh)
         PS1AudioUpdate();     // frees SFX channels whose sample ended (before the scripts run)
         PS1SpuDebugService();
+#if PS1_TEST
+        PS1TestPreFrame(); // input track, pokes
+#endif
         Engine.RunFrame();
         PS1ChainEnd();        // psyqo sends the chain after frame() returns
         uint32_t cpu     = PS1HblanksSince(t0);
@@ -164,6 +182,9 @@ class RSDKv2PS1App final : public psyqo::Application {
                 g_ps1PerfVideoMaxHbl = cpu;
         }
         PS1PerfTick(gpu());
+#if PS1_TEST
+        PS1TestPostFrame(); // telemetry, checkpoints, end of the run
+#endif
     }
 };
 
