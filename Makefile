@@ -146,6 +146,7 @@ disc:
 # Distribution image (phase 9): the verified disc as build/dist/SonicNexus-PS1.bin/.cue (NTSC-U
 # license). Build the natural game first (`make -j8`, not BOOT=SSZ / MEMCARD_TEST).
 dist: disc
+	@test -f rsdkv2.elf || { echo "dist: no rsdkv2.elf (a TEST= switch removed it): run make first"; exit 1; }
 	@if mipsel-none-elf-nm rsdkv2.elf | grep -q g_ps1TestBuild; then echo "dist: rsdkv2.ps-exe is a TEST=1 build"; exit 1; fi
 	mkdir -p build/dist
 	cp build/game.bin build/dist/SonicNexus-PS1.bin
