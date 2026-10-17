@@ -10,7 +10,7 @@
 # The emulated CD timing is PCSX-Redux's model (not hardware): compare request counts first.
 MODE=$1; OUT=${2:-/tmp/load_profile.log}; shift 2 2>/dev/null; EXTRA=("$@")
 PCSX=/Applications/PCSX-Redux.app/Contents/MacOS/PCSX-Redux
-GDB=/opt/homebrew/bin/gdb
+GDB=${GDB:-tools/gdbw}
 case $MODE in ssz) STOP=3 ;; natural) STOP=1900 ;; *) echo "usage: $0 ssz|natural OUT.log"; exit 1 ;; esac
 G=/tmp/load_profile.gdb
 cat > $G <<GDBEOF

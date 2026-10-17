@@ -4,7 +4,7 @@
 # Usage: tools/frame_capture.sh N OUT_PREFIX [BASELINE_PNG]
 N=$1; OUT=$2; BASE=$3
 PCSX=/Applications/PCSX-Redux.app/Contents/MacOS/PCSX-Redux
-GDB=/opt/homebrew/bin/gdb
+GDB=${GDB:-tools/gdbw}
 pkill -f PCSX-Redux 2>/dev/null; sleep 1
 cat > /tmp/frame_capture.gdb <<GDBEOF
 set pagination off

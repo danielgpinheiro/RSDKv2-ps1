@@ -7,7 +7,7 @@
 #   EXTRA_GDB_FILE: gdb commands run at frame 1 (e.g. pad test-mask breakpoints)
 N=$1; OUT=$2; MASK=${3:-1}; EXTRA=$4
 PCSX=/Applications/PCSX-Redux.app/Contents/MacOS/PCSX-Redux
-GDB=/opt/homebrew/bin/gdb
+GDB=${GDB:-tools/gdbw}
 pkill -f PCSX-Redux 2>/dev/null; sleep 1
 {
 cat <<GDBEOF

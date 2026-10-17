@@ -12,7 +12,7 @@ set -u
 cd "$(dirname "$0")/../.."
 W=${1:-/tmp/rsdk_memcard_test}; mkdir -p "$W"
 PCSX=/Applications/PCSX-Redux.app/Contents/MacOS/PCSX-Redux
-GDB=/opt/homebrew/bin/gdb
+GDB=${GDB:-tools/gdbw}
 CFG="$HOME/.config/pcsx-redux"
 MCD="python3 tools/memcard/mcd.py"
 mipsel-none-elf-nm rsdkv2.elf | grep -q PS1McSelfTest || { echo "not a MEMCARD_TEST=1 build"; exit 1; }
