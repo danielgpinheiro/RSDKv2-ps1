@@ -32,6 +32,10 @@ void ProcessStartupScripts() {
     ScriptFramesNo = 0;
 }
 
+#if PS1_PROFILE
+volatile uint32_t g_ps1ObjCalls = 0; // objects updated (regression work counter, make PROFILE=1)
+#endif
+
 void ProcessObjects() {
     for (int i = 0; i < DRAWLAYER_COUNT; ++i) ObjectDrawOrderList[i].listSize = 0;
 
@@ -50,6 +54,9 @@ void ProcessObjects() {
         }
 
         if (active && entity->type > OBJ_TYPE_BLANKOBJECT) {
+#if PS1_PROFILE
+            g_ps1ObjCalls = g_ps1ObjCalls + 1;
+#endif
             if (entity->type == OBJ_TYPE_PLAYER) {
                 if (ObjectLoop >= 2) {
                     entity->type = OBJ_TYPE_BLANKOBJECT;

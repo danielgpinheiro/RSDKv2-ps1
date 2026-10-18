@@ -80,6 +80,13 @@ CPPFLAGS += -DPS1_TEST=1
 SRCS += ps1/test_mode.cpp
 endif
 $(shell mkdir -p build/gen; [ -f build/gen/test.txt ] && [ "$$(cat build/gen/test.txt)" = "$(TEST)" ] || { echo "$(TEST)" > build/gen/test.txt; rm -f RSDKv2/main.o rsdkv2.elf; })
+# `make TEST=1 PROFILE=1`: work counters for the regression suite's work scenarios (../tests, docs/45 section 9):
+# g_ps1VmOps (script VM instructions, RSDKv2/Script.cpp) and g_ps1ObjCalls (objects updated, RSDKv2/Object.cpp).
+# Harness only (make dist refuses a TEST build). Rebuilds those two objects when switched (build/gen/profile.txt).
+ifeq ($(PROFILE),1)
+CPPFLAGS += -DPS1_PROFILE=1
+endif
+$(shell mkdir -p build/gen; [ -f build/gen/profile.txt ] && [ "$$(cat build/gen/profile.txt)" = "$(PROFILE)" ] || { echo "$(PROFILE)" > build/gen/profile.txt; rm -f RSDKv2/Script.o RSDKv2/Object.o rsdkv2.elf; })
 # C++20 is the minimum required by psyqo.
 CXXFLAGS = -std=c++20
 
