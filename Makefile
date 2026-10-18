@@ -163,3 +163,12 @@ mcicons:
 	/usr/bin/python3 tools/memcard/build_icons.py
 
 .PHONY: assets bytecode atlas audio disc dist icon mcicons
+
+# Regression suite (../docs/44 ledger, ../docs/45 design, ../tests/README.md): `make test` = this port's quick tier (run it
+# before every commit), `make test-full` = every scenario on both emulators, perf and memory gates (after engine,
+# interpreter, renderer or perf changes). The suite builds in its own shadow copy (../.rt-<port>), never here.
+.PHONY: test test-full
+test:
+	/usr/bin/python3 ../tests/run.py --port nexus
+test-full:
+	/usr/bin/python3 ../tests/run.py --tier full --port nexus
