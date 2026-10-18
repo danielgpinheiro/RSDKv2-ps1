@@ -1,4 +1,5 @@
 #include "../ps1/loading.hh"
+#include "../ps1/stack.hh"
 #include "../ps1/test_mode.hh"
 #if PS1_MEMCARD_TEST
 #include "../ps1/memcard.hh"
@@ -66,6 +67,8 @@ __attribute__((noinline)) static void PS1PerfTick(psyqo::GPU &gpu) {
     g_ps1HeapHeadroom = ss - top;
     if (s_ps1PerfVideoTick)
         g_ps1HeapVideoHeadroom = g_ps1HeapHeadroom;
+    if (PS1StackGuardBroken()) // the main stack (ps1/stack.hh) overflowed its 16 KB
+        g_ps1StackOverflow = g_ps1StackOverflow + 1;
 }
 
 psyqo::GPU         *g_ps1GPU   = nullptr;
@@ -243,7 +246,9 @@ int main(int argc, char *argv[])
 #if RETRO_PLATFORM == RETRO_PS1
     (void)argc;
     (void)argv;
-    return rsdkv2App.run();
+    // The app runs on its own .bss stack, out of the heap's way (ps1/stack.hh, NX-070).
+    PS1StackPaint();
+    return PS1RunOnStack([]() { return rsdkv2App.run(); }, g_ps1Stack + PS1_STACK_BYTES / 4);
 #else
 #if !RETRO_USE_ORIGINAL_CODE
     parseArguments(argc, argv);

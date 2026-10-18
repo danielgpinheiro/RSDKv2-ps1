@@ -52,11 +52,14 @@ ps1/sprite_atlas.cpp \
 ps1/spu.cpp \
 ps1/xa_music.cpp \
 ps1/loading.cpp \
+ps1/stack.cpp \
 
 # Engine include dir (belt-and-suspenders; quote-includes resolve relative to the .cpp anyway).
 # ps1/libc comes FIRST: its C/C++ shim headers (<string>, <cmath>, <stdio.h>, ...)
 # shadow any system headers the freestanding toolchain might otherwise surface.
 CPPFLAGS = -I ps1/libc -I RSDKv2
+# The main stack is a .bss array (ps1/stack.hh, NX-070): the test mode's stack checkpoint measures it there.
+CPPFLAGS += -DPS1_SEPARATE_STACK=1
 # `make BOOT=SSZ`: skip the intro and force-load SSZ Act 1 (regression harness /
 # baselines in tools/). Default: natural boot (Retro logo -> intro FMV -> title).
 # `make MEMCARD_TEST=1`: memory card self-test at boot (phase 8, RSDKv2/main.cpp; run it with
