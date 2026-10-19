@@ -2,6 +2,7 @@
 #if RETRO_PLATFORM == RETRO_PS1
 #include "common/syscalls/syscalls.h"
 #include "../ps1/sprite_atlas.hh"
+#include "../ps1/version_stamp.hh"
 #endif
 
 
@@ -1140,6 +1141,22 @@ void FlipScreen() {
     // The GPU renderer already chained the frame (DrawStageGfx); psyqo flips on vsync. Like
     // PC's palette conversion here, the palette is taken as it stands after drawing.
     PS1FinalizePalette();
+    {
+        // Build stamp (ps1/version_stamp.hh): bottom-left of the title (NTitle) only, 8 px from the edges, after
+        // everything else, faded with the palette (SetFade); its texture again on the title's first frame.
+        static int s_list = -1, s_pos = -1;
+        static bool s_title = false;
+        if (ActiveStageList != s_list || StageListPosition != s_pos) {
+            s_list     = ActiveStageList;
+            s_pos      = StageListPosition;
+            bool title = s_list == STAGELIST_PRESENTATION && StrComp(stageList[s_list][s_pos].folder, "NTitle");
+            if (title && !s_title)
+                PS1VersionUpload();
+            s_title = title;
+        }
+        if (s_title)
+            PS1VersionDraw(8, SCREEN_YSIZE - 8 - PS1_VERSION_TEXT_H, PS1DirectModulation());
+    }
     return;
 #endif
 

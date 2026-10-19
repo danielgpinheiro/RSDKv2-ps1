@@ -1,6 +1,7 @@
 #include "../ps1/loading.hh"
 #include "../ps1/stack.hh"
 #include "../ps1/test_mode.hh"
+#include "../ps1/version_stamp.hh"
 #if PS1_MEMCARD_TEST
 #include "../ps1/memcard.hh"
 void PS1McSelfTest(); // ps1/memcard_test.cpp
@@ -149,6 +150,7 @@ class RSDKv2PS1App final : public psyqo::Application {
             Engine.startSceneID[b] = 0;
         }
 #endif
+        PS1VersionLoad();  // VERSION.TXT (build stamp for the title screen, ps1/version_stamp.hh)
         PS1LoadingBegin(); // boot load (scripts, config, global SFX, music table)
         Engine.Init();
 #if PS1_TEST

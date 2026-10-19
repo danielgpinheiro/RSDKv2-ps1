@@ -53,6 +53,7 @@ ps1/spu.cpp \
 ps1/xa_music.cpp \
 ps1/loading.cpp \
 ps1/stack.cpp \
+ps1/version_stamp.cpp \
 
 # Engine include dir (belt-and-suspenders; quote-includes resolve relative to the .cpp anyway).
 # ps1/libc comes FIRST: its C/C++ shim headers (<string>, <cmath>, <stdio.h>, ...)
