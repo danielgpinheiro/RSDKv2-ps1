@@ -46,6 +46,7 @@ ps1/cdrom_fs.cpp \
 ps1/mdec.cpp \
 ps1/video.cpp \
 ps1/gpu_chain.cpp \
+ps1/gpu_detect.cpp \
 ps1/cdrom_stream.cpp \
 ps1/irq_guard.cpp \
 ps1/sprite_atlas.cpp \

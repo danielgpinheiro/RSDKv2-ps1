@@ -70,6 +70,7 @@ static int SetupHLineScrollLayer(int layerID) {
 #include <psyqo/primitives/quads.hh>
 #include <psyqo/primitives/sprites.hh>
 #include "../ps1/gpu_chain.hh"
+#include "../ps1/gpu_detect.hh"
 #include "../ps1/loading.hh"
 #include "../ps1/video.hh" // PS1Hblanks (layer profiling)
 
@@ -674,14 +675,69 @@ static void PS1ChainTileQuad(int x, int y, int w, int h, int pageX, int pageY, i
     PS1ChainQuad(quad);
 }
 
+// Flipped tiles as flip rectangles (docs/43 G3, NX-041; PS1FlipRectsLive): PS1DrawTilePiece records a band's flipped
+// tiles (screen x, image word | key << 16, key = page * 3 + dir - 1; the band's hot loop is untouched) and
+// PS1DrawTileBand chains them at its end, grouped by page and direction: one texpage with GP0(E1h) bit 12 (X) / 13 (Y)
+// each, then raw 16x16 sprites (or a partial band's sized sprites) from the tile's last texel column u + 15 / row
+// v + 15 - ty0. Tiles of a band never overlap, so the order is free (RSDKv4-ps1 PS1ChainFlipTiles).
+static uint32_t s_flipX[24], s_flipTv[24];
+static int s_flipN = 0, s_flipKeys = 0;
+static __attribute__((noinline)) void PS1FlipTileRecord(int dx, uint32_t tv, int key) {
+    if (s_flipN >= 24)
+        return;
+    s_flipX[s_flipN]    = (uint16_t)dx;
+    s_flipTv[s_flipN++] = (tv & 0xFFFF) | (uint32_t)key << 16;
+    s_flipKeys |= 1 << key;
+}
+static __attribute__((noinline)) void PS1ChainFlipTiles(const psyqo::PrimPieces::TPageAttr *tpages, uint32_t clutWord, int sy,
+                                                        int ty0, int h) {
+    const uint32_t *x = s_flipX, *tv = s_flipTv;
+    const int n = s_flipN, keys = s_flipKeys;
+    s_flipN = s_flipKeys = 0;
+    const uint32_t yWord = (uint32_t)(uint16_t)sy << 16;
+    for (int k = 0; k < 12; ++k) {
+        if (!(keys & (1 << k)))
+            continue;
+        int dir = k % 3 + 1;
+        uint16_t raw;
+        memcpy(&raw, &tpages[k / 3], 2);
+        raw = (uint16_t)(raw | (dir << 12)); // RSDK FLIP_X 1 / FLIP_Y 2 = GP0(E1h) bit 12 / 13
+        psyqo::PrimPieces::TPageAttr attr;
+        memcpy(&attr, &raw, 2);
+        PS1ChainTPage(attr);
+        const uint32_t du = (dir & FLIP_X) ? 15 : 0, dv = (uint32_t)((dir & FLIP_Y) ? 15 - ty0 : ty0) << 8;
+        for (int i = 0; i < n; ++i) {
+            if ((int)(tv[i] >> 16) != k)
+                continue;
+            uint32_t tex = ((tv[i] & 0xFFFF) + du + dv) | clutWord;
+            if (h == TILE_SIZE)
+                PS1ChainSprite16Raw(yWord | x[i], tex);
+            else {
+                psyqo::Prim::Sprite s(psyqo::Color{{.r = 0x80, .g = 0x80, .b = 0x80}});
+                s.position = psyqo::Vertex{{.x = (int16_t)x[i], .y = (int16_t)sy}};
+                s.texInfo  = psyqo::PrimPieces::TexInfo{(uint8_t)tex, (uint8_t)(tex >> 8), psyqo::PrimPieces::ClutIndex(
+                                                            psyqo::Vertex{{.x = PS1_CLUT_X, .y = PS1_CLUT_Y}})};
+                s.size     = psyqo::Vertex{{.x = TILE_SIZE, .y = (int16_t)h}};
+                PS1ChainSprite(s);
+            }
+        }
+    }
+    g_ps1TileFlipRects = g_ps1TileFlipRects + n;
+    g_ps1FlipFrameUsed = true;
+}
+
 // Rows [ty0, ty0 + h) of a 16x16 tile (tile rows before flipping) at screen (sx, sy).
 // Unflipped: Sprite16x16 / Sprite. Flipped (FLIP_X/Y/XY): a textured quad whose UVs run
 // backwards -- column k samples u+15-k from uL = u+15 to uR = u-1 (exclusive), 1:1 like PC.
-// No GP0(E1h) rectangle flip bits: old PSX GPUs don't support them (psx-spx GPU).
+// On a GPU that draws GP0(E1h) rectangle flips, flipped tiles are recorded for PS1DrawTileBand's PS1ChainFlipTiles.
 volatile uint32_t g_ps1LayerPrims = 0; // tile-layer primitives chained this frame (GDB)
 static void PS1DrawTilePiece(int sx, int sy, int tileIndex, int ty0, int h, int dir) {
     int pageX, pageY, u, v;
     PS1TileTexOf(tileIndex, pageX, pageY, u, v);
+    if (dir != FLIP_NONE && PS1FlipRectsLive()) {
+        PS1FlipTileRecord(sx, (uint32_t)(u | v << 8), (tileIndex >> 8) * 3 + dir - 1);
+        return;
+    }
     if (dir == FLIP_NONE) {
         psyqo::PrimPieces::TPageAttr attr;
         attr.set(psyqo::Prim::TPageAttr::ColorMode::Tex8Bits);
@@ -801,6 +857,8 @@ static void PS1DrawTileBand(const TileLayer *layer, byte above, int sy, int h, i
             curPage = -1; // quads carry their own texpage; sprites set it themselves
         }
     }
+    if (s_flipN) // flipped tiles PS1DrawTilePiece recorded (flip rectangles, NX-041)
+        PS1ChainFlipTiles(s_tileTPage, s_tileClutWord, sy, ty0, h);
     g_ps1LayerPrims = g_ps1LayerPrims + prims;
 }
 
@@ -2947,9 +3005,35 @@ static void PS1ScaledPiece(GFXSurface *surf, const PS1AtlasCluster *cl, int texP
     if (qx1 <= qx0 || qy1 <= qy0)
         return;
     int uL, uR; // FLIP_X mirrors the texels: screen-left shows the sprite's right edge
+    const bool unit = w == width && h == height;
     if (direction == FLIP_X) {
-        uL = uBase + width - a;
-        uR = uBase + width - b;
+        // 1:1: screen column k shows texel u + w - 1 - k as PC does (DrawScaledSprite from widthM1 down; NX-011): the GPU
+        // samples a quad's texels at their top-left point, so the UV edges are pulled back one texel (u + w - 1 .. u - 1);
+        // the far edge u + w would be the atlas's next column. A frame at u 0 can't (UV -1): the old edges stay.
+        int lo = uBase + width - b; // the lowest texel drawn
+        if (unit && !surf->vramDirect15 && !s_ps1QuadMaskMode && PS1FlipRectsLive()) {
+            int tu, tv;
+            if (PS1FlipRectTex(lo, vBase + ta, b - a, tb - ta, true, false, &tu, &tv)) { // flip rectangle (docs/43 G3)
+                psyqo::PrimPieces::TPageAttr attr = PS1ClusterTPage(cl);
+                uint16_t raw;
+                memcpy(&raw, &attr, 2);
+                raw = (uint16_t)(raw | 0x1000); // GP0(E1h) bit 12: X flip
+                memcpy(&attr, &raw, 2);
+                PS1ChainTPage(attr);
+                psyqo::Prim::Sprite s(psyqo::Color{{.r = 0x80, .g = 0x80, .b = 0x80}});
+                s.position = psyqo::Vertex{{.x = (int16_t)qx0, .y = (int16_t)qy0}};
+                s.size     = psyqo::Vertex{{.x = (int16_t)(b - a), .y = (int16_t)(tb - ta)}};
+                s.texInfo  = psyqo::PrimPieces::TexInfo{(uint8_t)tu, (uint8_t)tv, PS1ClusterClut(cl)};
+                PS1ChainSprite(s);
+                g_ps1SpriteFlipRects = g_ps1SpriteFlipRects + 1;
+                g_ps1FlipFrameUsed   = true;
+                return;
+            }
+            g_ps1SpriteFlipQuads = g_ps1SpriteFlipQuads + 1;
+        }
+        int pull = unit && lo >= 1 ? 1 : 0;
+        uL = uBase + width - a - pull;
+        uR = uBase + width - b - pull;
     } else {
         uL = uBase + a;
         uR = uBase + b;
@@ -3148,6 +3232,15 @@ void DrawRotatedSprite(int direction, int XPos, int YPos, int pivotX, int pivotY
         // directly (DrawSprite), while the software blit below targets FrameBuffer
         // which the PS1 renderer never displays.
         DrawSprite(XPos - pivotX, YPos - pivotY, width, height, sprX, sprY, sheetID);
+        return;
+    }
+    if (g_ps1GPU && !(rotation & 0x1FF) && direction == FLIP_X) {
+        // rotation 0 facing left (Sonic standing / running on flat ground): PC draws an exact 1:1 mirror, screen column k
+        // (from XPos + pivotX - width) showing texel sprX + width - 1 - k. The rotated quad below spanned width + 4 pixels
+        // (the software path's +-2 bounding margins) and started at the far edge u + width (NX-071): the 1:1 scaled path
+        // draws it instead (PS1ScaledPiece: a flip rectangle where the GPU draws them, else an exact quad; its pivot is
+        // the mirrored one, width - pivotX)
+        DrawScaledSprite(FLIP_X, XPos, YPos, width - pivotX, pivotY, 0x200, 0x200, width, height, sprX, sprY, sheetID);
         return;
     }
 #endif

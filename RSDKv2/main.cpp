@@ -16,6 +16,7 @@ void PS1McSelfTest(); // ps1/memcard_test.cpp
 #include <psyqo/advancedpad.hh>
 #include "../ps1/video.hh"
 #include "../ps1/gpu_chain.hh"
+#include "../ps1/gpu_detect.hh"
 
 #ifndef PS1_MEMCARD_TEST
 #define PS1_MEMCARD_TEST 0 // `make MEMCARD_TEST=1`: memory card self-test at boot (ps1/memcard_test.cpp)
@@ -149,6 +150,10 @@ class RSDKv2PS1App final : public psyqo::Application {
             for (b = 0; id[b]; ++b) Engine.startSceneID[b] = id[b];
             Engine.startSceneID[b] = 0;
         }
+#endif
+        PS1DetectGpu();    // flip-bit rectangles for flipped tiles and sprites if the GPU draws them (ps1/gpu_detect.hh)
+#if PS1_TEST
+        PS1TestNote("gpu", g_ps1GpuType, g_ps1GpuQuery7, g_ps1FlipTest); // "gpu type q7 readback" (0 = not tested)
 #endif
         PS1VersionLoad();  // VERSION.TXT (build stamp for the title screen, ps1/version_stamp.hh)
         PS1LoadingBegin(); // boot load (scripts, config, global SFX, music table)

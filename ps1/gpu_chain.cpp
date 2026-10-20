@@ -2,6 +2,7 @@
  * PS1 DMA-chained renderer helpers — see gpu_chain.hh.
  */
 #include "gpu_chain.hh"
+#include "gpu_detect.hh"
 
 #include <string.h>
 
@@ -124,7 +125,10 @@ void PS1ChainBegin(psyqo::GPU &gpu) {
     g_ps1ChainReplayWords = 0;
 }
 
+static void PS1ChainClearFlip();
+
 void PS1ChainEnd() {
+    PS1ChainClearFlip();
     flushBatch();
     uint32_t used = (uint32_t)(s_cur - s_base);
     g_ps1ChainLastWords = used;
@@ -229,6 +233,20 @@ void PS1ChainTPage(psyqo::PrimPieces::TPageAttr attr) {
 }
 
 void PS1ChainInvalidateTPage() { s_tpageValid = false; }
+
+// docs/43 G3: the frame chained a texpage with flip bits (flip rectangles, RSDKv2/Drawing.cpp sets g_ps1FlipFrameUsed);
+// textured quads don't change them, so the frame ends with one without them for whatever draws after it (loading icon,
+// FMV)
+static void PS1ChainClearFlip() {
+    if (!g_ps1FlipFrameUsed || !s_cur)
+        return;
+    g_ps1FlipFrameUsed = false;
+    uint16_t raw = (uint16_t)(s_lastTPage & ~0x3000);
+    psyqo::PrimPieces::TPageAttr attr;
+    memcpy(&attr, &raw, sizeof(raw));
+    s_tpageValid = false;
+    PS1ChainTPage(attr);
+}
 
 bool g_ps1ChainSkipPrims = false;
 
